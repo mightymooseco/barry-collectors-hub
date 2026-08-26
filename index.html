@@ -253,14 +253,19 @@ function eraOf(y){ return ERAS.find(e=>y>=e.lo&&y<=e.hi) || ERAS[ERAS.length-1];
 /* ---------- STATE (localStorage) ---------- */
 const LSKEY='bs_hub_marks_v1';
 const PRELOAD_MARKS = /*__PRELOAD__*/{}/*__ENDP__*/;
-let MARKS=null;
-try{ const raw=localStorage.getItem(LSKEY); if(raw) MARKS=JSON.parse(raw); }catch(e){ MARKS=null; }
-if(!MARKS){ MARKS=Object.assign({}, PRELOAD_MARKS); if(Object.keys(MARKS).length) saveMarks(); }
+const PRELOAD_SIG='bf21a9e8fbc5';
+const PSIG_KEY=LSKEY+'_psig', PDIS_KEY=LSKEY+'_pdis';
+let MARKS=null, _hadSaved=false, _pendingUpd=false;
+try{ const raw=localStorage.getItem(LSKEY); if(raw){ MARKS=JSON.parse(raw); _hadSaved=true; } }catch(e){ MARKS=null; }
+if(!MARKS){ MARKS=Object.assign({}, PRELOAD_MARKS); if(Object.keys(MARKS).length){ saveMarks(); try{ localStorage.setItem(PSIG_KEY, PRELOAD_SIG); }catch(e){} } }
+else if(_hadSaved && Object.keys(PRELOAD_MARKS).length){
+  try{ if(localStorage.getItem(PSIG_KEY)!==PRELOAD_SIG && localStorage.getItem(PDIS_KEY)!==PRELOAD_SIG) _pendingUpd=true; }catch(e){}
+}
 function saveMarks(){ try{ localStorage.setItem(LSKEY, JSON.stringify(MARKS)); }catch(e){ toast('⚠ Could not save (storage full/blocked)'); } idbSave(); }
 /* ---- durable backup: IndexedDB mirror + persistent storage ---- */
-let _idb=null;
+var _idb=null;
 function openIDB(){ return new Promise(res=>{ try{ const r=indexedDB.open('bshub',1); r.onupgradeneeded=()=>r.result.createObjectStore('kv'); r.onsuccess=()=>res(r.result); r.onerror=()=>res(null); }catch(e){ res(null); } }); }
-let _idbT=null;
+var _idbT=null;
 function idbSave(){ clearTimeout(_idbT); _idbT=setTimeout(async()=>{ try{ const db=_idb||(_idb=await openIDB()); if(!db)return; const os=db.transaction('kv','readwrite').objectStore('kv'); os.put(JSON.stringify(MARKS), LSKEY); os.put(JSON.stringify(CUSTOM), LSKEY+'_custom'); }catch(e){} }, 500); }
 function idbGet(key){ return (async()=>{ try{ const db=_idb||(_idb=await openIDB()); if(!db)return null; return await new Promise(r=>{ const g=db.transaction('kv').objectStore('kv').get(key); g.onsuccess=()=>{ try{ r(g.result?JSON.parse(g.result):null); }catch(e){ r(null); } }; g.onerror=()=>r(null); }); }catch(e){ return null; } })(); }
 async function idbLoad(){ return idbGet(LSKEY); }
@@ -679,7 +684,7 @@ function vGuide(){
    Got a card that isn't in the checklist — an oddball, an error, a brand-new release? Tap the blue <b>＋ button</b> (bottom-right), enter the year and set (card #, type, print run and notes are optional), and it's added straight to your collection. Your added cards show a <b>＋ Yours</b> tag and appear in Search, the year, and the Sets list like any other card. Open a card you added and use <b>🗑 Remove this card</b> to delete it — the checklist itself is never changed. Added cards are included in your backups (⋯ ▸ Export).</div></div>
   <div class="panel"><div class="ph">BACK UP / MOVE DEVICES</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
    Your marks live in this browser. Use <b>⋯ ▸ Export</b> to save a backup file, and <b>Import</b> to load it on another phone or computer. <b>Install</b> (⋯ ▸ Install / Add to Home Screen) puts it on your home screen and works offline.</div></div>
-  <div class="foot">Barry Sanders Collectors Hub · V172 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
+  <div class="foot">Barry Sanders Collectors Hub · V173 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
 }
 
 /* ---------- filters ---------- */
@@ -839,7 +844,7 @@ document.getElementById('menuBtn').onclick=()=>{
 };
 function undoReset(){ try{ const t=JSON.parse(localStorage.getItem('bs_hub_trash')||'null'); if(t&&t.marks){ MARKS=t.marks; saveMarks(); if(t.goals) localStorage.setItem('bs_hub_goals',JSON.stringify(t.goals)); render(); toast('Restored ✔'); } else { toast('Nothing to restore'); } }catch(e){} }
 function exportMarks(){
-  const data={app:'BarrySandersCollectorsHub',ver:'V172',exported:new Date().toISOString(),marks:MARKS,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
+  const data={app:'BarrySandersCollectorsHub',ver:'V173',exported:new Date().toISOString(),marks:MARKS,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fileBase('collection')+'-'+new Date().toISOString().slice(0,10)+'.json'; a.click();
   try{ localStorage.setItem('bs_hub_lastbackup', String(ownedCount())); }catch(e){}
@@ -915,6 +920,20 @@ function maybeWelcome(){
     const g=$('#wcGo'); if(g) g.onclick=()=>{ try{ localStorage.setItem('bs_hub_seen','1'); }catch(e){} closeModal(); };
   }, 350);
 }
+
+/* one-time "collection update available" prompt for returning devices when the pushed master collection has changed */
+function preloadUpdInfo(){ let add=0, chg=0; for(const k in PRELOAD_MARKS){ const p=PRELOAD_MARKS[k], c=MARKS[k]; const pOwn=p&&(p.o===1||p.o===true); const cOwn=c&&(c.o===1||c.o===true); if(pOwn&&!cOwn){ add++; } else if(JSON.stringify(Object.assign({},c||{},p))!==JSON.stringify(c||{})){ chg++; } } return {add,chg}; }
+function maybePreloadUpdate(){ if(!_pendingUpd) return; const {add,chg}=preloadUpdInfo(); if(add+chg===0){ try{ localStorage.setItem(PSIG_KEY, PRELOAD_SIG); }catch(e){} return; } setTimeout(()=>{
+    showModal(`<h3>📥 Collection update available</h3>
+      <p style="font-size:13.5px">The master collection changed since this device last synced${add?` — <b>${add}</b> new card${add===1?'':'s'} marked owned`:''}${chg?`${add?', plus ':' — '}<b>${chg}</b> updated`:''}.</p>
+      <p style="font-size:12.5px;color:var(--mut)">Applying adds these on this device. Your existing marks are kept — nothing is removed.</p>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="btn" id="puApply" style="flex:1">Apply update</button>
+        <button class="btn s" id="puLater" style="flex:1">Not now</button></div>`);
+    const a=$('#puApply'); if(a) a.onclick=applyPreloadUpdate;
+    const l=$('#puLater'); if(l) l.onclick=()=>{ try{ localStorage.setItem(PDIS_KEY, PRELOAD_SIG); }catch(e){} _pendingUpd=false; closeModal(); };
+  }, 400); }
+function applyPreloadUpdate(){ for(const k in PRELOAD_MARKS){ MARKS[k]=Object.assign({}, MARKS[k]||{}, PRELOAD_MARKS[k]); } saveMarks(); try{ localStorage.setItem(PSIG_KEY, PRELOAD_SIG); localStorage.removeItem(PDIS_KEY); }catch(e){} _pendingUpd=false; closeModal(); render(); toast('Collection updated ✔'); }
 
 /* ---------- add a custom card ---------- */
 function openAddCard(prefillYear){
@@ -1071,6 +1090,7 @@ document.getElementById('main').addEventListener('click',e=>{ if(e.target&&e.tar
 restoreState();
 (function(){ const h=location.hash.replace('#','').split('/'); if(h[0]){CUR.view=h[0]; if(h[1])CUR.year=+h[1];} })();
 maybeWelcome();
+maybePreloadUpdate();
 render();
 /* durable-storage: ask the browser not to evict, and recover from IndexedDB if localStorage was cleared */
 (async function(){
