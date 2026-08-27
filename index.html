@@ -250,7 +250,7 @@ const ERAS=[
 ];
 function eraOf(y){ return ERAS.find(e=>y>=e.lo&&y<=e.hi) || ERAS[ERAS.length-1]; }
 
-const APP_VER='V174';
+const APP_VER='V175';
 /* ---------- STATE (localStorage) ---------- */
 const LSKEY='bs_hub_marks_v1';
 const PRELOAD_MARKS = /*__PRELOAD__*/{}/*__ENDP__*/;
@@ -368,6 +368,7 @@ function itemHTML(id){
           </div>
           <div class="notowned-hint">Mark this card owned (＋) to log a grade & quantity.</div>
           <textarea data-jr placeholder="Notes — when/where you got it, condition, memories…">${esc(mk.j||'')}</textarea>
+          <button class="btn s" data-share aria-label="Share this card">📤 Share this card</button>
           ${cust?`<button class="btn s delcard" data-del aria-label="Remove this card you added">🗑 Remove this card</button>`:''}
         </div>
       </details>
@@ -414,6 +415,7 @@ function refreshCount(){ const el=document.querySelector('.count'); if(!el)retur
 function wireList(container){
   container.addEventListener('click',e=>{
     const item=e.target.closest('.item'); if(!item)return; const id=+item.dataset.id;
+    if(e.target.closest('[data-share]')){ shareCard(id); return; }
     if(e.target.closest('[data-del]')){ deleteCustom(id); return; }
     if(e.target.closest('[data-own]')){
       const now=!owned(id); markOwned(id,now);
@@ -663,6 +665,61 @@ function shareStats(){
   },'image/png');
 }
 
+/* ---------- share a single card (to X / anywhere) ---------- */
+function shareHub(){ return 'https://barry-collectors-hub.pages.dev'; }
+function xIntent(text){ try{ window.open('https://x.com/intent/tweet?text='+encodeURIComponent(text),'_blank','noopener'); }catch(e){} }
+function _rr(x,rx,ry,w,h,r){ x.beginPath(); x.moveTo(rx+r,ry); x.arcTo(rx+w,ry,rx+w,ry+h,r); x.arcTo(rx+w,ry+h,rx,ry+h,r); x.arcTo(rx,ry+h,rx,ry,r); x.arcTo(rx,ry,rx+w,ry,r); x.closePath(); }
+function _wrap(x,text,cx,cy,maxW,lh){ const words=String(text).split(' '); let line='',yy=cy; for(const wd of words){ const t=line?line+' '+wd:wd; if(x.measureText(t).width>maxW && line){ x.fillText(line,cx,yy); line=wd; yy+=lh; } else line=t; } if(line){ x.fillText(line,cx,yy); } return yy; }
+function cardGraphic(id){ return new Promise(res=>{
+  const c=CARDS[id], mk=m(id); const st=owned(id)?'own':(wantOf(id)>0?'want':'none');
+  const cv=document.createElement('canvas'); cv.width=1080; cv.height=1350; const x=cv.getContext('2d');
+  x.fillStyle='#0B3C5D'; x.fillRect(0,0,1080,1350); x.fillStyle='#0076B6'; x.fillRect(0,0,1080,18);
+  try{ x.drawImage(document.querySelector('header img'),60,58,140,140); }catch(e){}
+  x.fillStyle='#fff'; x.font='bold 46px Arial'; x.fillText('Barry Sanders',225,108);
+  x.fillStyle='#3aa7e0'; x.font='bold 40px Arial'; x.fillText('Collectors Hub',225,156);
+  x.fillStyle='#0a2a3f'; _rr(x,90,270,900,820,28); x.fill(); x.lineWidth=6; x.strokeStyle='#3aa7e0'; x.stroke();
+  x.fillStyle='#e8a900'; x.font='bold 118px Arial'; x.fillText(String(c[Y]),130,418);
+  x.fillStyle='#fff'; x.font='bold 54px Arial'; const endY=_wrap(x,c[S],130,500,820,62);
+  let ny=endY+66; if(c[N]){ x.fillStyle='#c8d7e6'; x.font='bold 46px Arial'; x.fillText('#'+c[N],130,ny); ny+=60; }
+  const meta=[c[T]]; if(c[RK])meta.push('Rookie'); if(c[GR])meta.push('Grail'); if(c[PR])meta.push('Serial /'+c[PR]); if(mk.g)meta.push('Graded '+mk.g);
+  x.fillStyle='#8fc8ee'; x.font='34px Arial'; x.fillText(meta.join('   ·   '),130,ny);
+  const rib= st==='own'?['✔  IN MY COLLECTION','#1f9d55','#fff'] : st==='want'?['★  ON MY WANT LIST','#e8a900','#3a2c00'] : ['ON MY CHECKLIST','#33627e','#fff'];
+  x.fillStyle=rib[1]; _rr(x,130,986,820,68,14); x.fill(); x.fillStyle=rib[2]; x.font='bold 40px Arial'; const tw=x.measureText(rib[0]).width; x.fillText(rib[0],540-tw/2,1030);
+  const nm=collectorName(); if(nm){ x.fillStyle='#c8d7e6'; x.font='italic 36px Arial'; x.fillText('— '+nm,90,1178); }
+  x.fillStyle='#89a6bb'; x.font='30px Arial'; x.fillText('barry-collectors-hub.pages.dev',90,1248);
+  x.fillStyle='#3aa7e0'; x.font='bold 30px Arial'; x.fillText('#BarrySanders   #Lions   #TheHobby',90,1300);
+  cv.toBlob(b=>res(b),'image/png');
+}); }
+function cardCaption(id){
+  const c=CARDS[id]; const st=owned(id)?'own':(wantOf(id)>0?'want':'none');
+  const nm=collectorName(); const poss=nm?(nm+"'s"):'my';
+  const name=c[Y]+' '+c[S]+(c[N]?' #'+c[N]:'')+' Barry Sanders';
+  const lead = st==='own' ? ('Just added the '+name+' to '+poss+' collection 🦁🔥')
+             : st==='want' ? ('Chasing this one 👀 — '+name)
+             : name;
+  return lead+'\n\nTracked on the Barry Sanders Collectors Hub → '+shareHub()+'\n#BarrySanders #Lions #TheHobby';
+}
+function shareCard(id){
+  const cap0=cardCaption(id);
+  showModal(`<h3>📤 Share this card</h3>
+    <img id="shPrev" alt="" style="width:100%;border-radius:12px;margin:4px 0 10px;background:#0a2a3f;min-height:130px">
+    <label style="font-size:12px;color:var(--mut)">Caption — edit if you like</label>
+    <textarea id="shCap" style="width:100%;min-height:98px;border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;font-size:13px;margin:4px 0 10px">${esc(cap0)}</textarea>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <button class="btn" id="shShare">📤 Share card graphic</button>
+      <button class="btn s" id="shPhoto">🖼️ Use my own photo instead</button>
+      <button class="btn s" id="shX">Post text to X</button>
+    </div>
+    <input type="file" id="shFile" accept="image/*" style="display:none">`);
+  let gblob=null; cardGraphic(id).then(b=>{ gblob=b; const im=$('#shPrev'); if(im&&b) im.src=URL.createObjectURL(b); });
+  const cap=()=>{ const t=$('#shCap'); return t?t.value:cap0; };
+  const viaFiles=(file)=>{ if(navigator.canShare&&navigator.canShare({files:[file]})){ navigator.share({files:[file],text:cap()}).catch(()=>{}); return true; } return false; };
+  const s=$('#shShare'); if(s) s.onclick=async()=>{ const b=gblob||await cardGraphic(id); const f=new File([b],'barry-sanders-card.png',{type:'image/png'}); if(!viaFiles(f)){ const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download='barry-sanders-card.png'; a.click(); xIntent(cap()); toast('Image saved — attach it to your post'); } };
+  const p=$('#shPhoto'); if(p) p.onclick=()=>{ const f=$('#shFile'); if(f) f.click(); };
+  const fi=$('#shFile'); if(fi) fi.onchange=e=>{ const f=e.target.files&&e.target.files[0]; if(!f)return; if(!viaFiles(f)){ xIntent(cap()); toast('Attach your photo in the post'); } };
+  const xb=$('#shX'); if(xb) xb.onclick=()=>xIntent(cap());
+}
+
 /* ---------- Goals ---------- */
 function vGoals(){
   const gp=goalProgress(); const done=gp.filter(g=>g.done).length;
@@ -685,7 +742,7 @@ function vGuide(){
    Got a card that isn't in the checklist — an oddball, an error, a brand-new release? Tap the blue <b>＋ button</b> (bottom-right), enter the year and set (card #, type, print run and notes are optional), and it's added straight to your collection. Your added cards show a <b>＋ Yours</b> tag and appear in Search, the year, and the Sets list like any other card. Open a card you added and use <b>🗑 Remove this card</b> to delete it — the checklist itself is never changed. Added cards are included in your backups (⋯ ▸ Export).</div></div>
   <div class="panel"><div class="ph">BACK UP / MOVE DEVICES</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
    Your marks live in this browser. Use <b>⋯ ▸ Export</b> to save a backup file, and <b>Import</b> to load it on another phone or computer. <b>Install</b> (⋯ ▸ Install / Add to Home Screen) puts it on your home screen and works offline.</div></div>
-  <div class="foot">Barry Sanders Collectors Hub · V174 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
+  <div class="foot">Barry Sanders Collectors Hub · V175 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
 }
 
 /* ---------- filters ---------- */
@@ -845,7 +902,7 @@ document.getElementById('menuBtn').onclick=()=>{
 };
 function undoReset(){ try{ const t=JSON.parse(localStorage.getItem('bs_hub_trash')||'null'); if(t&&t.marks){ MARKS=t.marks; saveMarks(); if(t.goals) localStorage.setItem('bs_hub_goals',JSON.stringify(t.goals)); render(); toast('Restored ✔'); } else { toast('Nothing to restore'); } }catch(e){} }
 function exportMarks(){
-  const data={app:'BarrySandersCollectorsHub',ver:'V174',exported:new Date().toISOString(),marks:MARKS,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
+  const data={app:'BarrySandersCollectorsHub',ver:'V175',exported:new Date().toISOString(),marks:MARKS,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fileBase('collection')+'-'+new Date().toISOString().slice(0,10)+'.json'; a.click();
   try{ localStorage.setItem('bs_hub_lastbackup', String(ownedCount())); }catch(e){}
