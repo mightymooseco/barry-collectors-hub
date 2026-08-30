@@ -252,7 +252,7 @@ const ERAS=[
 ];
 function eraOf(y){ return ERAS.find(e=>y>=e.lo&&y<=e.hi) || ERAS[ERAS.length-1]; }
 
-const APP_VER='V179';
+const APP_VER='V181';
 /* ---------- STATE (localStorage) ---------- */
 const LSKEY='bs_hub_marks_v1';
 const PRELOAD_MARKS = /*__PRELOAD__*/{}/*__ENDP__*/;
@@ -377,7 +377,7 @@ function itemHTML(id){
     <div class="it-ctl">
       <button class="own ${o?'on':''}" data-own title="Owned" aria-pressed="${o}" aria-label="${o?'Owned — tap to remove':'Mark owned'}">${o?'✔':'+'}</button>
       <span class="stars" data-star role="button" title="Want priority" aria-label="Want priority, ${w} of 3 stars">${star_spans(w)}</span>
-      <button class="shareico" data-share title="Share to X" aria-label="Share to X">🐦</button>
+      <button class="shareico" data-share title="Share to X" aria-label="Share to X"><svg viewBox="0 0 1200 1227" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M714.163 519.284L1160.89 0H1055.03L667.137 450.887L357.328 0H0L468.492 681.821L0 1227H105.866L515.491 750.218L842.672 1227H1200L714.137 519.284H714.163ZM569.165 687.828L521.697 619.934L144.011 79.6944H306.615L611.412 515.685L658.88 583.579L1055.08 1150.3H892.476L569.165 687.854V687.828Z"/></svg></button>
     </div>
   </div>`;
 }
@@ -703,11 +703,11 @@ function cardCaption(id){
 }
 function shareCard(id){
   const cap0=cardCaption(id);
-  showModal(`<h3>🐦 Share to X</h3>
+  showModal(`<h3><svg viewBox="0 0 1200 1227" width="16" height="16" fill="currentColor" aria-hidden="true" style="vertical-align:-2px"><path d="M714.163 519.284L1160.89 0H1055.03L667.137 450.887L357.328 0H0L468.492 681.821L0 1227H105.866L515.491 750.218L842.672 1227H1200L714.137 519.284H714.163ZM569.165 687.828L521.697 619.934L144.011 79.6944H306.615L611.412 515.685L658.88 583.579L1055.08 1150.3H892.476L569.165 687.854V687.828Z"/></svg> Share to X</h3>
     <label style="font-size:12px;color:var(--mut)">Caption — edit if you like</label>
     <textarea id="shCap" style="width:100%;min-height:110px;border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;font-size:13px;margin:4px 0 10px">${esc(cap0)}</textarea>
     <div style="display:flex;flex-direction:column;gap:8px">
-      <button class="btn" id="shX">🐦 Share to X</button>
+      <button class="btn" id="shX"><svg viewBox="0 0 1200 1227" width="14" height="14" fill="currentColor" aria-hidden="true" style="vertical-align:-2px;margin-right:4px"><path d="M714.163 519.284L1160.89 0H1055.03L667.137 450.887L357.328 0H0L468.492 681.821L0 1227H105.866L515.491 750.218L842.672 1227H1200L714.137 519.284H714.163ZM569.165 687.828L521.697 619.934L144.011 79.6944H306.615L611.412 515.685L658.88 583.579L1055.08 1150.3H892.476L569.165 687.854V687.828Z"/></svg>Share to X</button>
     </div>`);
   const cap=()=>{ const t=$('#shCap'); return t?t.value:cap0; };
   const xb=$('#shX'); if(xb) xb.onclick=()=>xIntent(cap());
@@ -735,7 +735,7 @@ function vGuide(){
    Got a card that isn't in the checklist — an oddball, an error, a brand-new release? Tap the blue <b>＋ button</b> (bottom-right), enter the year and set (card #, type, print run and notes are optional), and it's added straight to your collection. Your added cards show a <b>＋ Yours</b> tag and appear in Search, the year, and the Sets list like any other card. Open a card you added and use <b>🗑 Remove this card</b> to delete it — the checklist itself is never changed. Added cards are included in your backups (⋯ ▸ Export).</div></div>
   <div class="panel"><div class="ph">BACK UP / MOVE DEVICES</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
    Your marks live in this browser. Use <b>⋯ ▸ Export</b> to save a backup file, and <b>Import</b> to load it on another phone or computer. <b>Install</b> (⋯ ▸ Install / Add to Home Screen) puts it on your home screen and works offline.</div></div>
-  <div class="foot">Barry Sanders Collectors Hub · V179 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
+  <div class="foot">Barry Sanders Collectors Hub · V181 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
 }
 
 /* ---------- filters ---------- */
@@ -895,7 +895,7 @@ document.getElementById('menuBtn').onclick=()=>{
 };
 function undoReset(){ try{ const t=JSON.parse(localStorage.getItem('bs_hub_trash')||'null'); if(t&&t.marks){ MARKS=t.marks; saveMarks(); if(t.goals) localStorage.setItem('bs_hub_goals',JSON.stringify(t.goals)); render(); toast('Restored ✔'); } else { toast('Nothing to restore'); } }catch(e){} }
 function exportMarks(){
-  const data={app:'BarrySandersCollectorsHub',ver:'V179',exported:new Date().toISOString(),marks:MARKS,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
+  const data={app:'BarrySandersCollectorsHub',ver:'V181',exported:new Date().toISOString(),marks:MARKS,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fileBase('collection')+'-'+new Date().toISOString().slice(0,10)+'.json'; a.click();
   try{ localStorage.setItem('bs_hub_lastbackup', String(ownedCount())); }catch(e){}
