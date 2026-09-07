@@ -48,6 +48,9 @@ h2.view{font-size:20px;margin:6px 2px 12px;color:var(--navy);display:flex;align-
 /* stat cards */
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:16px}
 .stat{background:var(--navy);color:#fff;border-radius:12px;padding:14px;text-align:center}
+.stat.tap{cursor:pointer;transition:transform .08s ease, box-shadow .08s ease}
+.stat.tap:hover{transform:translateY(-2px);box-shadow:0 4px 14px rgba(0,0,0,.22)}
+.stat.tap:active{transform:translateY(0)}
 .stat .n{font-size:26px;font-weight:800}
 .stat .l{font-size:11px;letter-spacing:.5px;opacity:.8;text-transform:uppercase;margin-top:2px}
 /* era trackers */
@@ -233,6 +236,23 @@ try { CUSTOM = JSON.parse(localStorage.getItem('bs_hub_custom') || '[]') || []; 
 CUSTOM.forEach(row => CARDS.push(Array.isArray(row) ? row : DEAD_ROW.slice()));
 function isCustom(i){ return i >= CUSTOM_BASE; }
 function isDead(i){ return isCustom(i) && (!CARDS[i] || CARDS[i][S] === DEAD); }
+/* ---------- identity-based marks (so the catalog can change without breaking saved collections) ----------
+   Ownership is persisted keyed by a stable card identity (year|set|number), not by catalog position.
+   Runtime MARKS stays keyed by index for the rest of the app; we translate only on load/save. */
+const _MFILL=new Set(['and','the','of','a','w','with','edition','card','cards','series','ed','football','nfl']);
+function _mnorm(s){ s=String(s).toLowerCase().replace(/&/g,' and ').replace(/[^a-z0-9 ]/g,' '); return s.split(/\s+/).filter(t=>t&&!_MFILL.has(t)).sort().join(''); }
+function _mnumn(n){ n=String(n==null?'':n).toLowerCase(); if(n==='nno'||n==='none'||n==='') return ''; return n.replace(/[^a-z0-9]/g,''); }
+function cid(i){ if(i>=CUSTOM_BASE) return 'c|'+(i-CUSTOM_BASE); const c=CARDS[i]; if(!c) return 'x|'+i; return 'b|'+c[Y]+'|'+_mnorm(c[S])+'|'+_mnumn(c[N]); }
+function _idIndex(){ const map={}; for(let i=0;i<CARDS.length;i++){ if(CARDS[i]) map[cid(i)]=i; } return map; }
+/* stored (identity-keyed, or legacy integer-keyed) -> runtime {index:mark} */
+function storeToRuntime(stored){ const out={}; if(!stored||typeof stored!=='object') return out; const idx=_idIndex();
+  for(const k in stored){ const v=stored[k]; if(v==null) continue;
+    if(k.indexOf('|')>=0){ const i=idx[k]; if(i!=null) out[i]=v; }         // identity key -> current index (dormant if gone)
+    else { const i=+k; if(Number.isInteger(i)&&i>=0&&i<CARDS.length&&CARDS[i]) out[i]=v; } // legacy index (migrated on aligned catalog)
+  }
+  return out; }
+/* runtime {index:mark} -> stored identity-keyed */
+function runtimeToStore(marks){ const out={}; for(const k in marks){ const i=+k; if(i>=0&&i<CARDS.length&&CARDS[i]) out[cid(i)]=marks[k]; } return out; }
 function saveCustom(){ try{ localStorage.setItem('bs_hub_custom', JSON.stringify(CUSTOM)); }catch(e){} if(typeof idbSave==='function') idbSave(); }
 const SPECIAL = { police:{y:1989,s:'1989 Detroit Lions Police',n:'11'}, tt:{y:1989,s:'1989 Topps Traded Football',n:'83T'},
   score257:{y:1989,s:'1989 Score Football',n:'257'}, jersey96:{y:1996,s:'Upper Deck Game Jersey',n:'GJ-9'},
@@ -253,27 +273,28 @@ const ERAS=[
 ];
 function eraOf(y){ return ERAS.find(e=>y>=e.lo&&y<=e.hi) || ERAS[ERAS.length-1]; }
 
-const APP_VER='V193';
+const APP_VER='V194';
 /* ---------- STATE (localStorage) ---------- */
 const LSKEY='bs_hub_marks_v1';
 const PRELOAD_MARKS = /*__PRELOAD__*/{}/*__ENDP__*/;
 const PRELOAD_SIG='bf21a9e8fbc5';
 const PSIG_KEY=LSKEY+'_psig', PDIS_KEY=LSKEY+'_pdis';
 let MARKS=null, _hadSaved=false, _pendingUpd=false;
-try{ const raw=localStorage.getItem(LSKEY); if(raw){ MARKS=JSON.parse(raw); _hadSaved=true; } }catch(e){ MARKS=null; }
-if(!MARKS){ MARKS=Object.assign({}, PRELOAD_MARKS); if(Object.keys(MARKS).length){ saveMarks(); try{ localStorage.setItem(PSIG_KEY, PRELOAD_SIG); }catch(e){} } }
-else if(_hadSaved && Object.keys(PRELOAD_MARKS).length){
-  try{ if(localStorage.getItem(PSIG_KEY)!==PRELOAD_SIG && localStorage.getItem(PDIS_KEY)!==PRELOAD_SIG) _pendingUpd=true; }catch(e){}
+const PRELOAD_RT = storeToRuntime(PRELOAD_MARKS);   // master preload as runtime {index:mark}
+try{ const raw=localStorage.getItem(LSKEY); if(raw){ MARKS=storeToRuntime(JSON.parse(raw)); _hadSaved=true; } }catch(e){ MARKS=null; }
+if(!MARKS){ MARKS=Object.assign({}, PRELOAD_RT); if(Object.keys(MARKS).length){ saveMarks(); try{ localStorage.setItem(PSIG_KEY, PRELOAD_SIG); }catch(e){} } }
+else{
+  saveMarks();   // re-persist in identity format (harmless no-op if already migrated; one-time migration off legacy index keys)
+  if(_hadSaved && Object.keys(PRELOAD_RT).length){
+    try{ if(localStorage.getItem(PSIG_KEY)!==PRELOAD_SIG && localStorage.getItem(PDIS_KEY)!==PRELOAD_SIG) _pendingUpd=true; }catch(e){}
+  }
 }
-/* safety: drop any mark whose index is out of range or points to a missing row, so a
-   catalog change can never white-screen the app on a device with older saved marks */
-(function(){ try{ let d=0; for(const k in MARKS){ const i=+k; if(!Number.isInteger(i)||i<0||i>=CARDS.length||!CARDS[i]){ delete MARKS[k]; d++; } } if(d) saveMarks(); }catch(e){} })();
-function saveMarks(){ try{ localStorage.setItem(LSKEY, JSON.stringify(MARKS)); }catch(e){ toast('⚠ Could not save (storage full/blocked)'); } idbSave(); }
+function saveMarks(){ try{ localStorage.setItem(LSKEY, JSON.stringify(runtimeToStore(MARKS))); }catch(e){ toast('⚠ Could not save (storage full/blocked)'); } idbSave(); }
 /* ---- durable backup: IndexedDB mirror + persistent storage ---- */
 var _idb=null;
 function openIDB(){ return new Promise(res=>{ try{ const r=indexedDB.open('bshub',1); r.onupgradeneeded=()=>r.result.createObjectStore('kv'); r.onsuccess=()=>res(r.result); r.onerror=()=>res(null); }catch(e){ res(null); } }); }
 var _idbT=null;
-function idbSave(){ clearTimeout(_idbT); _idbT=setTimeout(async()=>{ try{ const db=_idb||(_idb=await openIDB()); if(!db)return; const os=db.transaction('kv','readwrite').objectStore('kv'); os.put(JSON.stringify(MARKS), LSKEY); os.put(JSON.stringify(CUSTOM), LSKEY+'_custom'); }catch(e){} }, 500); }
+function idbSave(){ clearTimeout(_idbT); _idbT=setTimeout(async()=>{ try{ const db=_idb||(_idb=await openIDB()); if(!db)return; const os=db.transaction('kv','readwrite').objectStore('kv'); os.put(JSON.stringify(runtimeToStore(MARKS)), LSKEY); os.put(JSON.stringify(CUSTOM), LSKEY+'_custom'); }catch(e){} }, 500); }
 function idbGet(key){ return (async()=>{ try{ const db=_idb||(_idb=await openIDB()); if(!db)return null; return await new Promise(r=>{ const g=db.transaction('kv').objectStore('kv').get(key); g.onsuccess=()=>{ try{ r(g.result?JSON.parse(g.result):null); }catch(e){ r(null); } }; g.onerror=()=>r(null); }); }catch(e){ return null; } })(); }
 async function idbLoad(){ return idbGet(LSKEY); }
 async function idbLoadCustom(){ return idbGet(LSKEY+'_custom'); }
@@ -469,11 +490,11 @@ function vDash(){
   ${installBar()}${iosHint()}${backupBar()}
   ${eraTrackers()}
   <div class="stats">
-    <div class="stat"><div class="n">${own.toLocaleString()}</div><div class="l">Owned</div></div>
+    <div class="stat tap" role="button" tabindex="0" onclick="go('collection')" title="View your collection"><div class="n">${own.toLocaleString()}</div><div class="l">Owned ›</div></div>
     <div class="stat"><div class="n">${total.toLocaleString()}</div><div class="l">Total Cards</div></div>
-    <div class="stat"><div class="n">${pct(own,total)}%</div><div class="l">Completion</div></div>
-    <div class="stat"><div class="n">${grailOwn}/${grailTotal}</div><div class="l">Grails</div></div>
-    <div class="stat"><div class="n">${goalsDone}/${gp.length}</div><div class="l">Goals</div></div>
+    <div class="stat tap" role="button" tabindex="0" onclick="go('collection')" title="View your collection"><div class="n">${pct(own,total)}%</div><div class="l">Completion ›</div></div>
+    <div class="stat tap" role="button" tabindex="0" onclick="go('grails')" title="View your grails"><div class="n">${grailOwn}/${grailTotal}</div><div class="l">Grails ›</div></div>
+    <div class="stat tap" role="button" tabindex="0" onclick="go('goals')" title="View your goals"><div class="n">${goalsDone}/${gp.length}</div><div class="l">Goals ›</div></div>
   </div>
   <div class="row2">
     <div class="panel"><div class="ph">📅 COMPLETION BY YEAR</div><div class="pb" style="max-height:420px;overflow:auto">${yrRows}</div></div>
@@ -739,7 +760,7 @@ function vGuide(){
    Got a card that isn't in the checklist — an oddball, an error, a brand-new release? Tap the blue <b>＋ button</b> (bottom-right), enter the year and set (card #, type, print run and notes are optional), and it's added straight to your collection. Your added cards show a <b>＋ Yours</b> tag and appear in Search, the year, and the Sets list like any other card. Open a card you added and use <b>🗑 Remove this card</b> to delete it — the checklist itself is never changed. Added cards are included in your backups (⋯ ▸ Export).</div></div>
   <div class="panel"><div class="ph">BACK UP / MOVE DEVICES</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
    Your marks live in this browser. Use <b>⋯ ▸ Export</b> to save a backup file, and <b>Import</b> to load it on another phone or computer. <b>Install</b> (⋯ ▸ Install / Add to Home Screen) puts it on your home screen and works offline.</div></div>
-  <div class="foot">Barry Sanders Collectors Hub · V193 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
+  <div class="foot">Barry Sanders Collectors Hub · V194 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
 }
 
 /* ---------- filters ---------- */
@@ -899,7 +920,7 @@ document.getElementById('menuBtn').onclick=()=>{
 };
 function undoReset(){ try{ const t=JSON.parse(localStorage.getItem('bs_hub_trash')||'null'); if(t&&t.marks){ MARKS=t.marks; saveMarks(); if(t.goals) localStorage.setItem('bs_hub_goals',JSON.stringify(t.goals)); render(); toast('Restored ✔'); } else { toast('Nothing to restore'); } }catch(e){} }
 function exportMarks(){
-  const data={app:'BarrySandersCollectorsHub',ver:'V193',exported:new Date().toISOString(),marks:MARKS,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
+  const data={app:'BarrySandersCollectorsHub',ver:'V194',fmt:'id1',exported:new Date().toISOString(),marks:runtimeToStore(MARKS),custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fileBase('collection')+'-'+new Date().toISOString().slice(0,10)+'.json'; a.click();
   try{ localStorage.setItem('bs_hub_lastbackup', String(ownedCount())); }catch(e){}
@@ -944,13 +965,13 @@ function applyImport(mode){
     // rebuild the custom section of the catalog from the file, then take its marks verbatim
     CARDS.length=CUSTOM_BASE; CUSTOM=[];
     inCustom.forEach(row=>{ CUSTOM.push(Array.isArray(row)?row:null); CARDS.push(Array.isArray(row)?row:DEAD_ROW.slice()); });
-    saveCustom(); MARKS=inMarks; saveMarks();
+    saveCustom(); MARKS=storeToRuntime(inMarks); saveMarks();
     if(d.goals) localStorage.setItem('bs_hub_goals',JSON.stringify(d.goals));
   } else {
     // merge base-checklist marks; append the file's custom cards as NEW entries (no index collisions)
-    const baseIn={}; Object.keys(inMarks).forEach(k=>{ if(+k<CUSTOM_BASE) baseIn[k]=inMarks[k]; });
-    mergeMarks(baseIn);
-    inCustom.forEach((row,pos)=>{ if(!Array.isArray(row))return; const mk=inMarks[CUSTOM_BASE+pos]; CUSTOM.push(row); const id=CARDS.push(row)-1; if(mk) MARKS[id]=Object.assign({}, mk); });
+    const baseIn={}; Object.keys(inMarks).forEach(k=>{ if(String(k).indexOf('c|')!==0) baseIn[k]=inMarks[k]; });
+    mergeMarks(storeToRuntime(baseIn));
+    inCustom.forEach((row,pos)=>{ if(!Array.isArray(row))return; const mk=inMarks['c|'+pos]||inMarks[String((d.customBase||CUSTOM_BASE)+pos)]; CUSTOM.push(row); const id=CARDS.push(row)-1; if(mk) MARKS[id]=Object.assign({}, mk); });
     saveCustom(); saveMarks();
     if(d.goals){ try{ const cg=JSON.parse(localStorage.getItem('bs_hub_goals')||'{}'); localStorage.setItem('bs_hub_goals', JSON.stringify(Object.assign({}, d.goals, cg))); }catch(e){} }
   }
@@ -977,7 +998,7 @@ function maybeWelcome(){
 }
 
 /* one-time "collection update available" prompt for returning devices when the pushed master collection has changed */
-function preloadUpdInfo(){ let add=0, chg=0; for(const k in PRELOAD_MARKS){ const p=PRELOAD_MARKS[k], c=MARKS[k]; const pOwn=p&&(p.o===1||p.o===true); const cOwn=c&&(c.o===1||c.o===true); if(pOwn&&!cOwn){ add++; } else if(JSON.stringify(Object.assign({},c||{},p))!==JSON.stringify(c||{})){ chg++; } } return {add,chg}; }
+function preloadUpdInfo(){ let add=0, chg=0; for(const k in PRELOAD_RT){ const p=PRELOAD_RT[k], c=MARKS[k]; const pOwn=p&&(p.o===1||p.o===true); const cOwn=c&&(c.o===1||c.o===true); if(pOwn&&!cOwn){ add++; } else if(JSON.stringify(Object.assign({},c||{},p))!==JSON.stringify(c||{})){ chg++; } } return {add,chg}; }
 function maybePreloadUpdate(){ if(!_pendingUpd) return; const {add,chg}=preloadUpdInfo(); if(add+chg===0){ try{ localStorage.setItem(PSIG_KEY, PRELOAD_SIG); }catch(e){} return; } setTimeout(()=>{
     showModal(`<h3>📥 Collection update available</h3>
       <p style="font-size:13.5px">The master collection changed since this device last synced${add?` — <b>${add}</b> new card${add===1?'':'s'} marked owned`:''}${chg?`${add?', plus ':' — '}<b>${chg}</b> updated`:''}.</p>
@@ -988,7 +1009,7 @@ function maybePreloadUpdate(){ if(!_pendingUpd) return; const {add,chg}=preloadU
     const a=$('#puApply'); if(a) a.onclick=applyPreloadUpdate;
     const l=$('#puLater'); if(l) l.onclick=()=>{ try{ localStorage.setItem(PDIS_KEY, PRELOAD_SIG); }catch(e){} _pendingUpd=false; closeModal(); };
   }, 400); }
-function applyPreloadUpdate(){ for(const k in PRELOAD_MARKS){ MARKS[k]=Object.assign({}, MARKS[k]||{}, PRELOAD_MARKS[k]); } saveMarks(); try{ localStorage.setItem(PSIG_KEY, PRELOAD_SIG); localStorage.removeItem(PDIS_KEY); }catch(e){} _pendingUpd=false; closeModal(); render(); toast('Collection updated ✔'); }
+function applyPreloadUpdate(){ for(const k in PRELOAD_RT){ MARKS[k]=Object.assign({}, MARKS[k]||{}, PRELOAD_RT[k]); } saveMarks(); try{ localStorage.setItem(PSIG_KEY, PRELOAD_SIG); localStorage.removeItem(PDIS_KEY); }catch(e){} _pendingUpd=false; closeModal(); render(); toast('Collection updated ✔'); }
 
 /* ---------- add a custom card ---------- */
 function openAddCard(prefillYear){
@@ -1180,7 +1201,7 @@ render();
     if(Object.keys(MARKS).length===0){
       const rc=await idbLoadCustom();
       if(Array.isArray(rc) && rc.length && CUSTOM.length===0){ CUSTOM=rc; rc.forEach(row=>CARDS.push(Array.isArray(row)?row:DEAD_ROW.slice())); saveCustom(); }
-      const r=await idbLoad(); if(r && Object.keys(r).length){ MARKS=r; saveMarks(); render(); toast('Your collection was restored ✔'); }
+      const r=await idbLoad(); if(r && Object.keys(r).length){ MARKS=storeToRuntime(r); saveMarks(); render(); toast('Your collection was restored ✔'); }
     }
     else { idbSave(); }
   }catch(e){}
