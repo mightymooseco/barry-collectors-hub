@@ -264,6 +264,47 @@ function storeToRuntime(stored){ const out={}; if(!stored||typeof stored!=='obje
   return out; }
 /* runtime {index:mark} -> stored stable-ID keyed */
 function runtimeToStore(marks){ const out={}; for(const k in marks){ const i=+k; if(i>=0&&i<CARDS.length&&CARDS[i]) out[cid(i)]=marks[k]; } return out; }
+
+/* ============================================================================
+   BACKUP ROBUSTNESS — anti-wipe guard, rolling snapshots, integrity, self-heal.
+   Goal: no single event (bad file, cleared store, fat-finger) can lose a collection.
+   ========================================================================== */
+var _lastGoodCount=-1, _guardBypass=false, _snapT=null;   // declared before the load block runs
+function _SNAPK(){ return LSKEY+'_snaps'; }
+function _GOODK(){ return LSKEY+'_good'; }
+function _ownedCount(rt){ let n=0; for(const k in rt){ const v=rt[k]; if(v&&v.o) n++; } return n; }
+function _wantCount(rt){ let n=0; for(const k in rt){ const v=rt[k]; if(v&&v.w) n++; } return n; }
+/* order-independent FNV-1a checksum over stored marks — detects corrupted/edited backups */
+function _sum(sm){ let h=2166136261>>>0; const ks=Object.keys(sm||{}).sort();
+  for(const k of ks){ const v=sm[k]||{}; const s=k+':'+Object.keys(v).sort().map(p=>p+'='+v[p]).join(',');
+    for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619)>>>0; } }
+  return ('00000000'+h.toString(16)).slice(-8); }
+/* ---- known-good anchor (localStorage): last healthy state, for instant rollback ---- */
+function _writeGood(){ try{ localStorage.setItem(_GOODK(), JSON.stringify({t:Date.now(), o:_ownedCount(MARKS), m:runtimeToStore(MARKS)})); }catch(e){} }
+function _readGood(){ try{ return JSON.parse(localStorage.getItem(_GOODK())||'null'); }catch(e){ return null; } }
+function restoreLastGood(){ const g=_readGood(); if(g&&g.m){ _guardBypass=true; MARKS=storeToRuntime(g.m);
+  try{ localStorage.setItem(LSKEY, JSON.stringify(runtimeToStore(MARKS))); }catch(e){} idbSave(); if(typeof render==='function') render(); toast('Kept your '+g.o+' owned ✔'); } }
+/* ---- rolling snapshot history (IndexedDB): last ~20 + one-per-day for a month ---- */
+async function _snapRead(){ const a=await idbGet(_SNAPK()); return Array.isArray(a)?a:[]; }
+async function _snapWrite(arr){ try{ const db=_idb||(_idb=await openIDB()); if(!db)return; db.transaction('kv','readwrite').objectStore('kv').put(JSON.stringify(arr), _SNAPK()); }catch(e){} }
+function _snapPrune(snaps){ snaps.sort((a,b)=>a.t-b.t); const now=Date.now(), DAY=86400000;
+  const recent=new Set(snaps.slice(-20)); const seenDay={}; const keep=[];
+  for(const s of snaps){ if(recent.has(s)){ keep.push(s); continue; }
+    const day=Math.floor(s.t/DAY); if((now-s.t)<=31*DAY && !seenDay[day]){ seenDay[day]=1; keep.push(s); } }
+  return keep.slice(-60); }
+function snapshotPush(reason){ (async()=>{ try{ const snaps=await _snapRead();
+  snaps.push({t:Date.now(), r:reason||'', o:_ownedCount(MARKS), w:_wantCount(MARKS), m:runtimeToStore(MARKS)});
+  await _snapWrite(_snapPrune(snaps)); }catch(e){} })(); }
+function snapshotMaybe(){ clearTimeout(_snapT); _snapT=setTimeout(()=>{ (async()=>{ try{ const snaps=await _snapRead();
+  const o=_ownedCount(MARKS), w=_wantCount(MARKS); const last=snaps[snaps.length-1];
+  if(last && last.o===o && last.w===w) return;                       // nothing meaningful changed
+  snaps.push({t:Date.now(), r:'auto', o, w, m:runtimeToStore(MARKS)});
+  await _snapWrite(_snapPrune(snaps)); }catch(e){} })(); }, 2500); }
+async function snapshotList(){ const a=await _snapRead(); return a.slice().sort((x,y)=>y.t-x.t); }
+function snapshotRestore(t){ (async()=>{ try{ const a=await _snapRead(); const s=a.find(x=>x.t===t);
+  if(!s){ toast('Snapshot not found'); return; }
+  snapshotPush('before-restore'); _guardBypass=true; MARKS=storeToRuntime(s.m); saveMarks(); if(typeof render==='function') render();
+  toast('Restored '+s.o+' owned from '+new Date(t).toLocaleString()); }catch(e){ toast('Could not restore'); } })(); }
 function saveCustom(){ try{ localStorage.setItem('bs_hub_custom', JSON.stringify(CUSTOM)); }catch(e){} if(typeof idbSave==='function') idbSave(); }
 const SPECIAL = { police:{y:1989,s:'1989 Detroit Lions Police',n:'11'}, tt:{y:1989,s:'1989 Topps Traded Football',n:'83T'},
   score257:{y:1989,s:'1989 Score Football',n:'257'}, jersey96:{y:1996,s:'Upper Deck Game Jersey',n:'GJ-9'},
@@ -284,7 +325,7 @@ const ERAS=[
 ];
 function eraOf(y){ return ERAS.find(e=>y>=e.lo&&y<=e.hi) || ERAS[ERAS.length-1]; }
 
-const APP_VER='V196';
+const APP_VER='V197';
 /* ---------- STATE (localStorage) ---------- */
 const LSKEY='bs_hub_marks_v1';
 const PRELOAD_MARKS = /*__PRELOAD__*/{}/*__ENDP__*/;
@@ -300,7 +341,20 @@ else{
     try{ if(localStorage.getItem(PSIG_KEY)!==PRELOAD_SIG && localStorage.getItem(PDIS_KEY)!==PRELOAD_SIG) _pendingUpd=true; }catch(e){}
   }
 }
-function saveMarks(){ try{ localStorage.setItem(LSKEY, JSON.stringify(runtimeToStore(MARKS))); }catch(e){ toast('⚠ Could not save (storage full/blocked)'); } idbSave(); }
+function saveMarks(){
+  const n=_ownedCount(MARKS);
+  /* anti-wipe guard: block a silent mass-loss unless it was an explicit action (_guardBypass) */
+  if(!_guardBypass && _lastGoodCount>=10 && (n===0 || n < Math.floor(_lastGoodCount*0.6))){
+    snapshotPush('auto-before-drop');
+    const ok=confirm('⚠ This would take your collection from '+_lastGoodCount+' owned down to '+n+'.\n\nThat’s a big drop — keep it?\n\nPress Cancel to undo and keep your '+_lastGoodCount+'.');
+    if(!ok){ restoreLastGood(); return; }
+  }
+  _guardBypass=false;
+  try{ localStorage.setItem(LSKEY, JSON.stringify(runtimeToStore(MARKS))); }catch(e){ toast('⚠ Could not save (storage full/blocked)'); }
+  _lastGoodCount=n; _writeGood();
+  idbSave();
+  snapshotMaybe();
+}
 /* ---- durable backup: IndexedDB mirror + persistent storage ---- */
 var _idb=null;
 function openIDB(){ return new Promise(res=>{ try{ const r=indexedDB.open('bshub',1); r.onupgradeneeded=()=>r.result.createObjectStore('kv'); r.onsuccess=()=>res(r.result); r.onerror=()=>res(null); }catch(e){ res(null); } }); }
@@ -771,7 +825,7 @@ function vGuide(){
    Got a card that isn't in the checklist — an oddball, an error, a brand-new release? Tap the blue <b>＋ button</b> (bottom-right), enter the year and set (card #, type, print run and notes are optional), and it's added straight to your collection. Your added cards show a <b>＋ Yours</b> tag and appear in Search, the year, and the Sets list like any other card. Open a card you added and use <b>🗑 Remove this card</b> to delete it — the checklist itself is never changed. Added cards are included in your backups (⋯ ▸ Export).</div></div>
   <div class="panel"><div class="ph">BACK UP / MOVE DEVICES</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
    Your marks live in this browser. Use <b>⋯ ▸ Export</b> to save a backup file, and <b>Import</b> to load it on another phone or computer. <b>Install</b> (⋯ ▸ Install / Add to Home Screen) puts it on your home screen and works offline.</div></div>
-  <div class="foot">Barry Sanders Collectors Hub · V196 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
+  <div class="foot">Barry Sanders Collectors Hub · V197 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
 }
 
 /* ---------- filters ---------- */
@@ -910,6 +964,9 @@ document.getElementById('menuBtn').onclick=()=>{
      <button class="btn s" id="mExportCsv">⬇ Export CSV</button>
      <button class="btn s" id="mImportCsv">⬆ Import CSV</button>
    </div>
+   <div class="actions" style="margin-top:8px">
+     <button class="btn s" id="mSnaps">⟲ Restore a previous version</button>
+   </div>
    <div class="actions" style="margin-top:14px">
      <button class="btn d" id="mReset">Reset all marks</button>
      <button class="btn s" id="mClose">Close</button>
@@ -925,13 +982,24 @@ document.getElementById('menuBtn').onclick=()=>{
   $('#mImport').onclick=()=>$('#mFile').click();
   $('#mFile').onchange=importMarks;
   $('#mExportCsv').onclick=exportCSV;
+  $('#mSnaps').onclick=()=>{ closeModal(); showSnapshots(); };
   $('#mImportCsv').onclick=()=>$('#mCsv').click();
   $('#mCsv').onchange=e=>{ const f=e.target.files[0]; e.target.value=''; if(f) importCSV(f); };
-  $('#mReset').onclick=()=>{ if(confirm('Erase all owned/want/grade marks on this device? You\'ll get one chance to undo right after.')){ try{ localStorage.setItem('bs_hub_trash', JSON.stringify({marks:MARKS, goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}'), t:Date.now()})); }catch(e){} MARKS={}; saveMarks(); localStorage.removeItem('bs_hub_goals'); closeModal(); render(); toastUndo('All marks cleared', undoReset, 8000); } };
+  $('#mReset').onclick=()=>{ if(confirm('Erase all owned/want/grade marks on this device? You\'ll get one chance to undo right after.')){ try{ localStorage.setItem('bs_hub_trash', JSON.stringify({marks:MARKS, goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}'), t:Date.now()})); }catch(e){} snapshotPush('before-reset'); MARKS={}; _guardBypass=true; saveMarks(); localStorage.removeItem('bs_hub_goals'); closeModal(); render(); toastUndo('All marks cleared', undoReset, 8000); } };
 };
 function undoReset(){ try{ const t=JSON.parse(localStorage.getItem('bs_hub_trash')||'null'); if(t&&t.marks){ MARKS=t.marks; saveMarks(); if(t.goals) localStorage.setItem('bs_hub_goals',JSON.stringify(t.goals)); render(); toast('Restored ✔'); } else { toast('Nothing to restore'); } }catch(e){} }
+function showSnapshots(){
+  snapshotList().then(list=>{
+    if(!list.length){ showModal('<h3>Previous versions</h3><p style="font-size:13px;color:var(--mut)">No saved snapshots yet — they’re created automatically as you make changes.</p><div class="actions"><button class="btn p" id="mClose">Close</button></div>'); $('#mClose').onclick=closeModal; return; }
+    const rows=list.slice(0,40).map(s=>`<button class="btn s" data-snap="${s.t}" style="display:flex;justify-content:space-between;width:100%;text-align:left">${new Date(s.t).toLocaleString()}<span style="color:var(--mut)">${s.o} owned</span></button>`).join('');
+    showModal('<h3>Restore a previous version</h3><p style="font-size:12.5px;color:var(--mut)">Tap a snapshot to roll back. Your current state is saved first, so this is always undoable.</p><div style="display:flex;flex-direction:column;gap:6px;max-height:50vh;overflow:auto;margin:8px 0">'+rows+'</div><div class="actions"><button class="btn s" id="mClose">Close</button></div>');
+    $('#mClose').onclick=closeModal;
+    document.querySelectorAll('[data-snap]').forEach(b=>b.onclick=()=>{ const t=+b.dataset.snap; if(confirm('Roll back to '+new Date(t).toLocaleString()+'?')){ closeModal(); snapshotRestore(t); } });
+  });
+}
 function exportMarks(){
-  const data={app:'BarrySandersCollectorsHub',ver:'V196',fmt:'id2',exported:new Date().toISOString(),marks:runtimeToStore(MARKS),custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
+  const _m=runtimeToStore(MARKS);
+  const data={app:'BarrySandersCollectorsHub',ver:'V197',fmt:'id2',schema:2,exported:new Date().toISOString(),count:{o:_ownedCount(MARKS),w:_wantCount(MARKS)},sum:_sum(_m),marks:_m,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fileBase('collection')+'-'+new Date().toISOString().slice(0,10)+'.json'; a.click();
   try{ localStorage.setItem('bs_hub_lastbackup', String(ownedCount())); }catch(e){}
@@ -941,6 +1009,9 @@ let _pendingImport=null;
 function importMarks(e){
   const f=e.target.files[0]; if(!f)return; const r=new FileReader();
   r.onload=()=>{ try{ const d=JSON.parse(r.result); if(!d.marks||typeof d.marks!=='object'){ alert('That file has no collection data.'); return; }
+    const nk=Object.keys(d.marks).length;
+    if(nk>200000){ alert('That file looks malformed (too large) — not importing.'); return; }
+    if(d.sum && _sum(d.marks)!==d.sum){ if(!confirm('⚠ This backup’s checksum doesn’t match — the file may be corrupted or edited. Import anyway?')) return; }
     _pendingImport=d;
     const inc=Object.keys(d.marks).filter(k=>d.marks[k]&&d.marks[k].o).length; const cur=ownedCount();
     showModal(`<h3>📥 Import backup</h3>
@@ -997,7 +1068,7 @@ function applyImport(mode){
     // rebuild the custom section of the catalog from the file, then take its marks verbatim
     CARDS.length=CUSTOM_BASE; CUSTOM=[];
     inCustom.forEach(row=>{ CUSTOM.push(Array.isArray(row)?row:null); CARDS.push(Array.isArray(row)?row:DEAD_ROW.slice()); });
-    saveCustom(); MARKS=storeToRuntime(inMarks); saveMarks();
+    saveCustom(); snapshotPush('before-import'); MARKS=storeToRuntime(inMarks); _guardBypass=true; saveMarks();
     if(d.goals) localStorage.setItem('bs_hub_goals',JSON.stringify(d.goals));
   } else {
     // merge base-checklist marks; append the file's custom cards as NEW entries (no index collisions)
@@ -1227,13 +1298,18 @@ render();
   f.textContent='Barry Sanders Collectors Hub · '+APP_VER;
   f.onclick=function(){ try{ toast('You’re on '+APP_VER+' — checking for updates…'); }catch(e){} try{ checkAppVersion(); }catch(e){} };
 })();
-/* durable-storage: ask the browser not to evict, and recover from IndexedDB if localStorage was cleared */
+/* durable-storage: ask the browser not to evict, and self-heal from the healthiest surviving copy
+   (IndexedDB mirror or the known-good anchor) if localStorage was cleared or came back empty */
 (async function(){
   try{
-    if(Object.keys(MARKS).length===0){
+    if(_ownedCount(MARKS)===0){
       const rc=await idbLoadCustom();
       if(Array.isArray(rc) && rc.length && CUSTOM.length===0){ CUSTOM=rc; rc.forEach(row=>CARDS.push(Array.isArray(row)?row:DEAD_ROW.slice())); saveCustom(); }
-      const r=await idbLoad(); if(r && Object.keys(r).length){ MARKS=storeToRuntime(r); saveMarks(); render(); toast('Your collection was restored ✔'); }
+      const cands=[];
+      const r=await idbLoad(); if(r) cands.push({src:'idb', m:r, o:_ownedCount(storeToRuntime(r))});
+      const g=_readGood(); if(g&&g.m) cands.push({src:'good', m:g.m, o:g.o||_ownedCount(storeToRuntime(g.m))});
+      let best=null; for(const c of cands){ if(c.o>0 && (!best||c.o>best.o)) best=c; }
+      if(best){ _guardBypass=true; MARKS=storeToRuntime(best.m); saveMarks(); render(); toast('Your collection was restored ✔ ('+best.o+' owned)'); }
     }
     else { idbSave(); }
   }catch(e){}
