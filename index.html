@@ -101,6 +101,19 @@ input,select,textarea{font-size:16px}
 .item{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:10px 12px;margin-bottom:8px;display:flex;gap:10px;align-items:flex-start}
 .item.owned{background:#eafaf0;border-color:#bfe6cd}
 .it-main{flex:1;min-width:0}
+.it-thumb{flex:0 0 auto;width:54px;height:74px;border-radius:7px;overflow:hidden;background:#f0f2f5;border:1px solid var(--line);display:flex;align-items:center;justify-content:center}
+.it-thumb .cthumb{width:100%;height:100%;object-fit:cover;display:block}
+.imgctl{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.imgctl .btn{padding:6px 10px;font-size:12px}
+.n.up,.num.up{color:#1E7A46}
+.n.down,.num.down{color:#B0413A}
+.prow.nu{cursor:pointer}
+.prow.nu .pv{color:var(--lions);font-weight:600}
+.prow.nu:hover{background:var(--hover,#f3f6fa)}
+.badges{display:flex;flex-wrap:wrap;gap:7px;padding:12px 14px}
+.mbadge{display:inline-flex;align-items:center;gap:4px;font-size:12.5px;padding:6px 10px;border-radius:999px;background:#eef1f5;color:#8a97a5;border:1px solid var(--line)}
+.mbadge.on{background:#fff6e0;color:#7a5a00;border-color:#f0d9a0;cursor:pointer;font-weight:600}
+.mbadge.on:hover{background:#ffeec4}
 .it-set{font-weight:700;font-size:14px;color:var(--navy)}
 .it-set .yr{color:var(--silver);font-weight:800;margin-right:2px;font-size:12px}
 .it-desc{font-size:12.5px;color:var(--mut);margin-top:2px;white-space:pre-line;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -325,7 +338,7 @@ const ERAS=[
 ];
 function eraOf(y){ return ERAS.find(e=>y>=e.lo&&y<=e.hi) || ERAS[ERAS.length-1]; }
 
-const APP_VER='V198';
+const APP_VER='V199';
 /* ---------- STATE (localStorage) ---------- */
 const LSKEY='bs_hub_marks_v1';
 const PRELOAD_MARKS = /*__PRELOAD__*/{}/*__ENDP__*/;
@@ -357,13 +370,56 @@ function saveMarks(){
 }
 /* ---- durable backup: IndexedDB mirror + persistent storage ---- */
 var _idb=null;
-function openIDB(){ return new Promise(res=>{ try{ const r=indexedDB.open('bshub',1); r.onupgradeneeded=()=>r.result.createObjectStore('kv'); r.onsuccess=()=>res(r.result); r.onerror=()=>res(null); }catch(e){ res(null); } }); }
+function openIDB(){ return new Promise(res=>{ try{ const r=indexedDB.open('bshub',2);
+  r.onupgradeneeded=()=>{ const db=r.result; if(!db.objectStoreNames.contains('kv')) db.createObjectStore('kv'); if(!db.objectStoreNames.contains('photos')) db.createObjectStore('photos'); };
+  r.onsuccess=()=>res(r.result); r.onerror=()=>res(null); }catch(e){ res(null); } }); }
 var _idbT=null;
 function idbSave(){ clearTimeout(_idbT); _idbT=setTimeout(async()=>{ try{ const db=_idb||(_idb=await openIDB()); if(!db)return; const os=db.transaction('kv','readwrite').objectStore('kv'); os.put(JSON.stringify(runtimeToStore(MARKS)), LSKEY); os.put(JSON.stringify(CUSTOM), LSKEY+'_custom'); }catch(e){} }, 500); }
 function idbGet(key){ return (async()=>{ try{ const db=_idb||(_idb=await openIDB()); if(!db)return null; return await new Promise(r=>{ const g=db.transaction('kv').objectStore('kv').get(key); g.onsuccess=()=>{ try{ r(g.result?JSON.parse(g.result):null); }catch(e){ r(null); } }; g.onerror=()=>r(null); }); }catch(e){ return null; } })(); }
 async function idbLoad(){ return idbGet(LSKEY); }
 async function idbLoadCustom(){ return idbGet(LSKEY+'_custom'); }
 async function requestPersist(){ try{ if(navigator.storage&&navigator.storage.persist){ if(!(await navigator.storage.persisted())) await navigator.storage.persist(); } }catch(e){} }
+
+/* ============================================================================
+   CARD IMAGES — your own photos (compressed, in IndexedDB) + an optional image link.
+   Photos live in the 'photos' store keyed by card identity (cid); only the fact that
+   a photo exists rides in memory (PHOTOKEYS). Links are tiny URLs kept on the mark (img).
+   Nothing is scraped; catalog stays offline-friendly and localStorage stays small.
+   ========================================================================== */
+var PHOTOKEYS=new Set();                 // cid strings that have a stored photo
+const PHOTO_MAXDIM=1000, PHOTO_Q=0.72;   // compression: longest edge px, JPEG quality
+function _photoStore(mode){ return (async()=>{ const db=_idb||(_idb=await openIDB()); if(!db)return null; return db.transaction('photos',mode).objectStore('photos'); })(); }
+async function photoGet(cidk){ try{ const os=await _photoStore('readonly'); if(!os)return null; return await new Promise(r=>{ const g=os.get(cidk); g.onsuccess=()=>r(g.result||null); g.onerror=()=>r(null); }); }catch(e){ return null; } }
+async function photoPut(cidk,dataURL){ try{ const os=await _photoStore('readwrite'); if(!os)return false; os.put(dataURL,cidk); PHOTOKEYS.add(cidk); return true; }catch(e){ return false; } }
+async function photoDel(cidk){ try{ const os=await _photoStore('readwrite'); if(!os)return; os.delete(cidk); PHOTOKEYS.delete(cidk); }catch(e){} }
+async function photoLoadKeys(){ try{ const os=await _photoStore('readonly'); if(!os)return; await new Promise(r=>{ const g=os.getAllKeys(); g.onsuccess=()=>{ (g.result||[]).forEach(k=>PHOTOKEYS.add(k)); r(); }; g.onerror=()=>r(); }); }catch(e){} }
+function hasImage(id){ return PHOTOKEYS.has(cid(id)) || !!m(id).img; }
+/* compress a chosen file to a small JPEG data URL */
+function compressPhoto(file){ return new Promise((res,rej)=>{ const fr=new FileReader();
+  fr.onload=()=>{ const im=new Image(); im.onload=()=>{ let{width:w,height:h}=im; const s=Math.min(1, PHOTO_MAXDIM/Math.max(w,h)); w=Math.round(w*s); h=Math.round(h*s);
+    const cv=document.createElement('canvas'); cv.width=w; cv.height=h; cv.getContext('2d').drawImage(im,0,0,w,h);
+    try{ res(cv.toDataURL('image/jpeg',PHOTO_Q)); }catch(e){ rej(e); } };
+    im.onerror=rej; im.src=fr.result; };
+  fr.onerror=rej; fr.readAsDataURL(file); }); }
+async function addPhoto(id,file){ if(!file)return; try{ toast('Saving photo…'); const dataURL=await compressPhoto(file);
+  const ok=await photoPut(cid(id),dataURL); if(ok){ refreshItemById(id); updatePhotoMeter(); toast('Photo added ✔'); } else toast('⚠ Could not save photo'); }catch(e){ toast('⚠ Could not read that image'); } }
+async function removePhoto(id){ await photoDel(cid(id)); refreshItemById(id); updatePhotoMeter(); toast('Photo removed'); }
+function setImageLink(id){ const cur=m(id).img||''; const url=prompt('Paste an image link (a picture you have the right to use — your own photo hosting, your listing photo, etc.). Leave blank to remove.', cur);
+  if(url===null) return; const u=url.trim(); if(u && !/^https?:\/\//i.test(u)){ toast('That doesn’t look like a link'); return; } setMark(id,{img:u}); refreshItemById(id); }
+function refreshItemById(id){ const item=document.querySelector('.item[data-id="'+id+'"]'); if(item) refreshItem(item,id); }
+/* image element for a card row/detail: your photo > linked image > nothing (text-only fallback) */
+function imageThumb(id){ const k=cid(id);
+  if(PHOTOKEYS.has(k)) return `<img class="cthumb" data-photo="${esc(k)}" alt="Your photo" decoding="async">`;
+  const u=m(id).img; if(u) return `<img class="cthumb" src="${esc(u)}" loading="lazy" decoding="async" alt="Card image" onerror="this.style.display='none'">`;
+  return ''; }
+/* lazy-fill photo thumbnails from IndexedDB only when they scroll into view */
+var _photoIO=null;
+function observePhotos(root){ try{ if(!('IntersectionObserver'in window)){ (root||document).querySelectorAll('img[data-photo]:not([data-done])').forEach(async im=>{ const d=await photoGet(im.getAttribute('data-photo')); if(d){im.src=d;} im.setAttribute('data-done','1'); }); return; }
+  _photoIO=_photoIO||new IntersectionObserver((ents,ob)=>{ ents.forEach(async e=>{ if(!e.isIntersecting)return; const im=e.target; ob.unobserve(im); if(im.getAttribute('data-done'))return; im.setAttribute('data-done','1'); const d=await photoGet(im.getAttribute('data-photo')); if(d) im.src=d; }); },{rootMargin:'300px'});
+  (root||document).querySelectorAll('img[data-photo]:not([data-done])').forEach(im=>_photoIO.observe(im)); }catch(e){} }
+async function updatePhotoMeter(){ const el=document.getElementById('photoMeter'); if(!el) return; let mb='';
+  try{ if(navigator.storage&&navigator.storage.estimate){ const est=await navigator.storage.estimate(); if(est&&est.usage) mb=' · ~'+(est.usage/1048576).toFixed(0)+' MB used'; } }catch(e){}
+  el.textContent=PHOTOKEYS.size+' photo'+(PHOTOKEYS.size===1?'':'s')+' saved on this device'+mb; }
 /* ---- collector name (used on shared image + file names) ---- */
 function collectorName(){ return (localStorage.getItem('bs_hub_name')||'').trim(); }
 function nameSlug(){ const s=collectorName().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,''); return s||''; }
@@ -373,7 +429,7 @@ function m(id){ return MARKS[id] || {}; }
 function setMark(id, patch){
   const cur = Object.assign({}, MARKS[id]||{}, patch);
   // clean empties
-  ['o','w','g','q','j'].forEach(k=>{ if(cur[k]===''||cur[k]===0||cur[k]===false||cur[k]==null) delete cur[k]; });
+  ['o','w','g','q','j','img','paid','val'].forEach(k=>{ if(cur[k]===''||cur[k]===0||cur[k]===false||cur[k]==null) delete cur[k]; });
   if(Object.keys(cur).length) MARKS[id]=cur; else delete MARKS[id];
   saveMarks();
 }
@@ -389,6 +445,10 @@ const owned=id=>!!m(id).o;
 const wantOf=id=>m(id).w||0;
 const gradeOf=id=>m(id).g||'';
 const qtyOf=id=>m(id).q||0;
+const paidOf=id=>+m(id).paid||0;
+const valOf=id=>+m(id).val||0;
+function money(n){ return '$'+(Math.round(n*100)/100).toLocaleString(undefined,{minimumFractionDigits:(n%1?2:0),maximumFractionDigits:2}); }
+function portfolioTotals(){ let invested=0,estValue=0,nPaid=0,nVal=0; ownedIds().forEach(i=>{ const p=paidOf(i),v=valOf(i); if(p){invested+=p;nPaid++;} if(v){estValue+=v;nVal++;} }); return {invested,estValue,nPaid,nVal,net:estValue-invested}; }
 
 /* ---------- derived helpers ---------- */
 const ownedIds=()=>Object.keys(MARKS).filter(id=>MARKS[id].o).map(Number);
@@ -428,11 +488,12 @@ function render(){
   if(CUR.view==='set' && !CUR.setName) CUR.view='sets';
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===CUR.view||(CUR.view==='set'&&b.dataset.v==='sets')));
   const el=document.getElementById('main'); el.scrollTop=0;
-  const fn={dashboard:vDash,years:vYear,search:vSearch,collection:vCollection,recent:vRecent,wants:vWants,trades:vTrades,grails:vGrails,sets:vSets,set:vSet,goals:vGoals,guide:vGuide}[CUR.view]||vDash;
+  const fn={dashboard:vDash,years:vYear,search:vSearch,collection:vCollection,recent:vRecent,wants:vWants,trades:vTrades,grails:vGrails,sets:vSets,set:vSet,goals:vGoals,portfolio:vPortfolio,guide:vGuide}[CUR.view]||vDash;
   el.innerHTML=fn();
   wire();
   updateNav();
   saveState();
+  observePhotos(el);
   window.scrollTo(0,0);
 }
 
@@ -446,8 +507,11 @@ function itemHTML(id){
   const ad=(o&&mk.a)?`<span class="num addchip" title="Added to your collection">🕒 ${fmtDate(mk.a)}</span>`:'';
   const cust=isCustom(id)&&!isDead(id);
   const custBadge=cust?`<span class="badge" style="background:#e6eefc;color:#2b5cad" title="A card you added">＋ Yours</span>`:'';
-  const chips=[mk.g?esc(mk.g):'', mk.q>1?('×'+mk.q):'', mk.j?'📝 notes':''].filter(Boolean).join(' · ');
+  const chips=[mk.g?esc(mk.g):'', mk.q>1?('×'+mk.q):'', mk.val?('💰 '+money(+mk.val)):'', mk.j?'📝 notes':''].filter(Boolean).join(' · ');
+  const thumb=imageThumb(id);
+  const hasImg=PHOTOKEYS.has(cid(id))||!!mk.img;
   return `<div class="item ${o?'owned':''}" data-id="${id}">
+    ${thumb?`<div class="it-thumb">${thumb}</div>`:''}
     <div class="it-main">
       <div class="it-set"><span class="yr">${c[Y]}</span> ${esc(c[S])}${c[N]?` <span class="num">#${esc(c[N])}</span>`:''}</div>
       <div class="it-desc">${esc(c[D])}</div>
@@ -457,9 +521,17 @@ function itemHTML(id){
           <div class="ownedonly mini">
             <label>Grade<select data-grade>${GRADES.map(g=>`<option ${g===(mk.g||'')?'selected':''}>${g||'—'}</option>`).join('')}</select></label>
             <label>Qty<input class="qty" type="number" min="0" data-qty value="${mk.q||''}" placeholder="0"></label>
+            <label>Paid $<input class="qty" type="number" min="0" step="0.01" data-paid value="${mk.paid||''}" placeholder="0"></label>
+            <label>Value $<input class="qty" type="number" min="0" step="0.01" data-val value="${mk.val||''}" placeholder="0"></label>
           </div>
           <div class="notowned-hint">Mark this card owned (＋) to log a grade & quantity.</div>
           <textarea data-jr placeholder="Notes — when/where you got it, condition, memories…">${esc(mk.j||'')}</textarea>
+          <div class="imgctl">
+            <button class="btn s" data-photobtn>📷 ${PHOTOKEYS.has(cid(id))?'Change photo':'Add photo'}</button>
+            <input type="file" accept="image/*" data-photoin class="hidden">
+            <button class="btn s" data-linkbtn>🔗 ${mk.img?'Edit link':'Image link'}</button>
+            ${hasImg?`<button class="btn s" data-imgdel>🗑 Remove image</button>`:''}
+          </div>
           ${cust?`<button class="btn s delcard" data-del aria-label="Remove this card you added">🗑 Remove this card</button>`:''}
         </div>
       </details>
@@ -487,6 +559,7 @@ function showMore(){
   const btn=document.getElementById('moreBtn'); if(!btn)return;
   const start=SHOWN; SHOWN=Math.min(SHOWN+PAGE, CUR_IDS.length);
   btn.insertAdjacentHTML('beforebegin', CUR_IDS.slice(start,SHOWN).map(i=>itemHTML(i)).join(''));
+  observePhotos(btn.parentNode||document);
   const rem=CUR_IDS.length-SHOWN;
   if(rem<=0) btn.remove(); else btn.textContent=`Show ${Math.min(PAGE,rem)} more (${rem.toLocaleString()} left)`;
 }
@@ -509,11 +582,14 @@ function wireList(container){
     const item=e.target.closest('.item'); if(!item)return; const id=+item.dataset.id;
     if(e.target.closest('[data-share]')){ shareCard(id); return; }
     if(e.target.closest('[data-del]')){ deleteCustom(id); return; }
+    if(e.target.closest('[data-photobtn]')){ const fi=item.querySelector('[data-photoin]'); if(fi) fi.click(); return; }
+    if(e.target.closest('[data-linkbtn]')){ setImageLink(id); return; }
+    if(e.target.closest('[data-imgdel]')){ if(PHOTOKEYS.has(cid(id))) removePhoto(id); if(m(id).img) setMark(id,{img:''}); refreshItemById(id); return; }
     if(e.target.closest('[data-own]')){
       const now=!owned(id); markOwned(id,now);
       if(!inCurrentList(id)){ item.remove(); refreshCount(); }
       else { item.classList.toggle('owned',now); const b=item.querySelector('[data-own]'); b.classList.toggle('on',now); b.textContent=now?'✔':'+'; }
-      updateNav(); toast(now?'Added to collection ✔':'Removed');
+      updateNav(); toast(now?'Added to collection ✔':'Removed'); if(now) checkMilestones();
     } else if(e.target.closest('[data-sv]')){
       const v=+e.target.dataset.sv; const nw=wantOf(id)===v?0:v; setMark(id,{w:nw});
       if(!inCurrentList(id)){ item.remove(); refreshCount(); }
@@ -523,13 +599,16 @@ function wireList(container){
   });
   container.addEventListener('change',e=>{
     const item=e.target.closest('.item'); if(!item)return; const id=+item.dataset.id;
-    if(e.target.matches('[data-grade]')){ setMark(id,{g:e.target.value}); syncSummary(item,id); }
+    if(e.target.matches('[data-photoin]')){ const f=e.target.files&&e.target.files[0]; e.target.value=''; if(f) addPhoto(id,f); return; }
+    if(e.target.matches('[data-grade]')){ setMark(id,{g:e.target.value}); syncSummary(item,id); checkMilestones(); }
     else if(e.target.matches('[data-qty]')){ setMark(id,{q:+e.target.value||0}); syncSummary(item,id); if(!inCurrentList(id)){ item.remove(); refreshCount(); } }
+    else if(e.target.matches('[data-paid]')){ setMark(id,{paid:+e.target.value||0}); }
+    else if(e.target.matches('[data-val]')){ setMark(id,{val:+e.target.value||0}); syncSummary(item,id); }
     else if(e.target.matches('[data-jr]')){ setMark(id,{j:e.target.value}); syncSummary(item,id); }
     updateNav();
   });
 }
-function syncSummary(item,id){ const mk=m(id); const s=item.querySelector('.xp>summary'); if(!s)return; const chips=[mk.g?mk.g:'', mk.q>1?('×'+mk.q):'', mk.j?'📝 notes':''].filter(Boolean).join(' · '); s.textContent='Grade · Qty · Notes'+(chips?' — '+chips:''); }
+function syncSummary(item,id){ const mk=m(id); const s=item.querySelector('.xp>summary'); if(!s)return; const chips=[mk.g?mk.g:'', mk.q>1?('×'+mk.q):'', mk.val?('💰 '+money(+mk.val)):'', mk.j?'📝 notes':''].filter(Boolean).join(' · '); s.textContent='Grade · Qty · Value · Notes'+(chips?' — '+chips:''); }
 function refreshItem(item,id){ const tmp=document.createElement('div'); tmp.innerHTML=itemHTML(id); const nu=tmp.firstElementChild; item.replaceWith(nu); }
 
 /* ---------- Dashboard ---------- */
@@ -560,7 +639,9 @@ function vDash(){
     <div class="stat tap" role="button" tabindex="0" onclick="go('collection')" title="View your collection"><div class="n">${pct(own,total)}%</div><div class="l">Completion ›</div></div>
     <div class="stat tap" role="button" tabindex="0" onclick="go('grails')" title="View your grails"><div class="n">${grailOwn}/${grailTotal}</div><div class="l">Grails ›</div></div>
     <div class="stat tap" role="button" tabindex="0" onclick="go('goals')" title="View your goals"><div class="n">${goalsDone}/${gp.length}</div><div class="l">Goals ›</div></div>
+    <div class="stat tap" role="button" tabindex="0" onclick="go('portfolio')" title="View your portfolio"><div class="n">${money((portfolioTotals().estValue)||portfolioTotals().invested)}</div><div class="l">Value ›</div></div>
   </div>
+  ${nextUp()}
   <div class="row2">
     <div class="panel"><div class="ph">📅 COMPLETION BY YEAR</div><div class="pb" style="max-height:420px;overflow:auto">${yrRows}</div></div>
     <div>
@@ -588,6 +669,54 @@ function eraTrackers(){
       <div class="bar"><i style="width:${p}%;background:${era.color}"></i></div>
     </div>`;
   }).join('')+`</div>`;
+}
+
+/* ---------- Next Up (smart suggestions) ---------- */
+function nextUp(){
+  if(!ownedCount()) return '';
+  const yr={}; CARDS.forEach((c,i)=>{ if(isDead(i))return; (yr[c[Y]]=yr[c[Y]]||[0,0]); yr[c[Y]][1]++; if(owned(i))yr[c[Y]][0]++; });
+  const yClose=Object.keys(yr).map(Number).filter(y=>yr[y][0]>0&&yr[y][0]<yr[y][1]).map(y=>[y,yr[y][1]-yr[y][0]]).sort((a,b)=>a[1]-b[1]).slice(0,3);
+  const br={}; CARDS.forEach((c,i)=>{ if(isDead(i))return; const k=c[B]||'Other'; (br[k]=br[k]||[0,0]); br[k][1]++; if(owned(i))br[k][0]++; });
+  const bClose=Object.keys(br).filter(k=>br[k][0]>0&&br[k][0]<br[k][1]).map(k=>[k,br[k][1]-br[k][0]]).sort((a,b)=>a[1]-b[1]).slice(0,2);
+  const gp=goalProgress().filter(g=>!g.done&&g.target>0&&g.now>0).sort((a,b)=>(b.now/b.target)-(a.now/a.target));
+  const g0=gp[0];
+  const grailNeed=CARDS.reduce((n,c,i)=>n+((c[GR]&&!owned(i))?1:0),0);
+  let rows='';
+  yClose.forEach(([y,rem])=>{ rows+=`<div class="prow link nu" onclick="go('years',${y})"><div class="pl">Finish <b>${y}</b></div><div class="pv">${rem} to go ›</div></div>`; });
+  bClose.forEach(([k,rem])=>{ rows+=`<div class="prow link nu" data-set="${esc(k)}"><div class="pl">Complete <b>${esc(k)}</b></div><div class="pv">${rem} to go ›</div></div>`; });
+  if(g0) rows+=`<div class="prow link nu" onclick="go('goals')"><div class="pl">Goal: ${esc(g0.name)}</div><div class="pv">${g0.now}/${g0.target} ›</div></div>`;
+  if(grailNeed) rows+=`<div class="prow link nu" onclick="go('grails')"><div class="pl">Chase a grail</div><div class="pv">${grailNeed} left ›</div></div>`;
+  if(!rows) return `<div class="panel"><div class="ph">🎯 NEXT UP</div><div class="pb" style="padding:12px 14px;font-size:13px;color:var(--mut)">You've completed every year and set with cards owned — incredible. 🏆</div></div>`;
+  return `<div class="panel"><div class="ph">🎯 NEXT UP</div><div class="pb">${rows}</div></div>`;
+}
+
+/* ---------- Portfolio (value tracking) ---------- */
+function vPortfolio(){
+  const pf=portfolioTotals(); const own=ownedIds();
+  if(!pf.nPaid && !pf.nVal){
+    return `<h2 class="view">💰 Portfolio</h2>
+    <div class="panel"><div class="pb" style="padding:16px;font-size:13.5px;color:var(--mut)">
+      No values logged yet. Open any owned card and fill in <b>Paid $</b> (what you paid) and/or <b>Value $</b> (what it's worth now). Your totals — invested, estimated value, and gain/loss — will build here, broken down by era and your biggest cards.</div></div>`;
+  }
+  const netCls = pf.net>0?'up':(pf.net<0?'down':'');
+  const netStr = (pf.net>=0?'+':'−')+money(Math.abs(pf.net));
+  const roi = pf.invested? Math.round(pf.net/pf.invested*100):0;
+  let eraRows=ERAS.map(era=>{ let inv=0,val=0,cnt=0; own.forEach(i=>{const y=CARDS[i][Y]; if(y>=era.lo&&y<=era.hi){ if(paidOf(i)||valOf(i))cnt++; inv+=paidOf(i); val+=valOf(i);}}); if(!inv&&!val)return'';
+    return `<div class="prow"><div class="pl">${era.short} <span class="num">${cnt}</span></div><div class="pv">${money(inv)} → ${money(val)}</div><div class="bar" style="visibility:hidden"></div><div class="pct"></div></div>`; }).join('');
+  const top=own.filter(i=>valOf(i)>0).sort((a,b)=>valOf(b)-valOf(a)).slice(0,10);
+  let topRows=top.map(i=>{ const c=CARDS[i]; const g=paidOf(i)?(valOf(i)-paidOf(i)):0; const gs=paidOf(i)?` <span class="num ${g>=0?'up':'down'}">${g>=0?'+':'−'}${money(Math.abs(g))}</span>`:'';
+    return `<div class="prow"><div class="pl">${c[Y]} ${esc(c[S])}${c[N]?` #${esc(c[N])}`:''}${gs}</div><div class="pv">${money(valOf(i))}</div><div class="bar" style="visibility:hidden"></div><div class="pct"></div></div>`; }).join('');
+  return `<h2 class="view">💰 Portfolio</h2>
+  <div class="stats">
+    <div class="stat"><div class="n">${money(pf.invested)}</div><div class="l">Invested (${pf.nPaid})</div></div>
+    <div class="stat"><div class="n">${money(pf.estValue)}</div><div class="l">Est. value (${pf.nVal})</div></div>
+    <div class="stat"><div class="n ${netCls}">${netStr}</div><div class="l">Net ${pf.invested?`(${roi>=0?'+':''}${roi}%)`:''}</div></div>
+  </div>
+  <p style="font-size:11.5px;color:var(--mut);margin:2px 2px 10px">Totals are your own entries (USD). Net compares total value against total paid across all owned cards — a rough figure, not live market pricing.</p>
+  <div class="row2">
+    <div class="panel"><div class="ph">📈 BY ERA · paid → value</div><div class="pb">${eraRows||'<div style="padding:12px;color:var(--mut);font-size:13px">No era data yet.</div>'}</div></div>
+    <div class="panel"><div class="ph">🏅 BIGGEST CARDS BY VALUE</div><div class="pb">${topRows||'<div style="padding:12px;color:var(--mut);font-size:13px">Add a Value to an owned card to see it here.</div>'}</div></div>
+  </div>`;
 }
 
 /* ---------- Years ---------- */
@@ -724,7 +853,7 @@ function bulkMark(val){
   if(ids.length>40 && !confirm(`${val?'Mark':'Clear'} ${ids.length} cards${val?' as owned':''}?`)) return;
   lastBulk=ids.map(i=>[i, MARKS[i]?JSON.parse(JSON.stringify(MARKS[i])):null]);
   ids.forEach(i=>markOwned(i,val));
-  render(); toastUndo(`${ids.length} card${ids.length===1?'':'s'} ${val?'marked owned ✔':'cleared'}`);
+  render(); toastUndo(`${ids.length} card${ids.length===1?'':'s'} ${val?'marked owned ✔':'cleared'}`); if(val) checkMilestones();
 }
 function undoBulk(){ if(!lastBulk)return; lastBulk.forEach(([i,prev])=>{ if(prev)MARKS[i]=prev; else delete MARKS[i]; }); saveMarks(); lastBulk=null; render(); toast('Undone'); }
 function toastUndo(msg, fn, ms){ const t=document.getElementById('toast'); t.innerHTML=`${esc(msg)} <button id="undoBtn">Undo</button>`; t.classList.add('show'); const b=document.getElementById('undoBtn'); if(b) b.onclick=()=>{ (fn||undoBulk)(); t.classList.remove('show'); }; clearTimeout(toastT); toastT=setTimeout(()=>{ t.classList.remove('show'); t.textContent=''; },ms||6000); }
@@ -803,10 +932,92 @@ function shareCard(id){
   const xb=$('#shX'); if(xb) xb.onclick=()=>xIntent(cap());
 }
 
+/* ---------- Milestones (celebratory + shareable to X) ---------- */
+function MILESTONES(){
+  const own=ownedCount();
+  const list=[
+    {k:'first',icon:'🎉',title:'First card in the books',earned:own>=1},
+    {k:'own10',icon:'🔟',title:'10 cards owned',earned:own>=10},
+    {k:'own25',icon:'🏈',title:'25 cards owned',earned:own>=25},
+    {k:'own50',icon:'⭐',title:'50 cards owned',earned:own>=50},
+    {k:'own100',icon:'💯',title:'100 cards owned',earned:own>=100},
+    {k:'own250',icon:'🔥',title:'250 cards owned',earned:own>=250},
+    {k:'own500',icon:'🏆',title:'500 cards owned',earned:own>=500},
+    {k:'own1000',icon:'👑',title:'1,000 cards owned',earned:own>=1000},
+    {k:'auto',icon:'✍️',title:'First autograph',earned:typeOwned('Autograph')>0},
+    {k:'relic',icon:'🧵',title:'First relic',earned:(typeOwned('Relic')+typeOwned('Auto Relic'))>0},
+    {k:'oneofone',icon:'1️⃣',title:'First 1-of-1',earned:!!anyOwned(i=>CARDS[i][T]==='Printing Plate'||CARDS[i][PR]===1||/1\/1|1-of-1/i.test(CARDS[i][D]))},
+    {k:'lownum',icon:'🔢',title:'First low-numbered (/10 or under)',earned:!!anyOwned(i=>CARDS[i][PR]&&CARDS[i][PR]<=10)},
+    {k:'gem',icon:'💎',title:'First graded gem',earned:!!gemOwned()},
+    {k:'grail',icon:'🗝️',title:'First grail',earned:!!anyOwned(i=>CARDS[i][GR])},
+    {k:'rookies89',icon:'🅁',title:'All four 1989 rookies',earned:ownedIds().filter(i=>CARDS[i][Y]===1989).length>=4},
+  ];
+  ERAS.forEach(era=>{ let o=0,t=0; for(let i=0;i<CARDS.length;i++){ if(isDead(i))continue; const c=CARDS[i]; if(c[Y]>=era.lo&&c[Y]<=era.hi){t++; if(owned(i))o++;} }
+    list.push({k:'era_'+era.lo,icon:'✅',title:'Completed the '+era.name,earned:t>0&&o===t}); });
+  return list;
+}
+function earnedMilestoneKeys(){ return MILESTONES().filter(m=>m.earned).map(m=>m.k); }
+function _badgesSeen(){ try{ return JSON.parse(localStorage.getItem('bs_hub_badges')||'null'); }catch(e){ return null; } }
+function initMilestoneBaseline(){ try{ if(_badgesSeen()===null) localStorage.setItem('bs_hub_badges', JSON.stringify(earnedMilestoneKeys())); }catch(e){} }
+function checkMilestones(){ try{
+  const seen=_badgesSeen(); if(seen===null){ initMilestoneBaseline(); return; }   // never flood on first ever run
+  const cur=earnedMilestoneKeys(); const prev=new Set(seen); const fresh=cur.filter(k=>!prev.has(k));
+  if(fresh.length){ localStorage.setItem('bs_hub_badges', JSON.stringify(cur)); celebrateMilestones(fresh); }
+}catch(e){} }
+function celebrateMilestones(keys){ const all=MILESTONES(); const items=keys.map(k=>all.find(m=>m.k===k)).filter(Boolean); if(!items.length)return;
+  const first=items[0];
+  const more=items.length>1?`<p style="font-size:12.5px;color:var(--mut)">+${items.length-1} more unlocked — see them under Goals & Badges.</p>`:'';
+  showModal(`<div style="text-align:center"><div style="font-size:56px;line-height:1">${first.icon}</div>
+    <h3 style="margin:6px 0 2px">Milestone unlocked!</h3>
+    <p style="font-size:15.5px;font-weight:600;margin:0 0 4px">${esc(first.title)}</p>${more}
+    <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
+      <button class="btn p" id="msShare"><svg viewBox="0 0 1200 1227" width="14" height="14" fill="currentColor" style="vertical-align:-2px;margin-right:4px"><path d="M714.163 519.284L1160.89 0H1055.03L667.137 450.887L357.328 0H0L468.492 681.821L0 1227H105.866L515.491 750.218L842.672 1227H1200L714.137 519.284H714.163ZM569.165 687.828L521.697 619.934L144.011 79.6944H306.615L611.412 515.685L658.88 583.579L1055.08 1150.3H892.476L569.165 687.854V687.828Z"/></svg>Share to X</button>
+      <button class="btn s" id="msClose">Nice! 🎉</button></div></div>`);
+  const sb=$('#msShare'); if(sb) sb.onclick=()=>{ closeModal(); shareMilestone(first.k); };
+  const cb=$('#msClose'); if(cb) cb.onclick=closeModal;
+}
+function milestoneCaption(ms){ const nm=collectorName(); const who=nm?(nm+' just'):'Just';
+  return `🏆 Milestone unlocked: ${ms.title}!\n\n${who} hit it on my Barry Sanders card collection — ${ownedCount().toLocaleString()} cards and counting.\nTrack yours free → ${shareHub()}\n#StillCollecting #BarrySanders`; }
+function shareMilestone(key){ const ms=MILESTONES().find(m=>m.k===key); if(!ms)return; const cap0=milestoneCaption(ms);
+  showModal(`<h3>${ms.icon} Share milestone</h3>
+    <label style="font-size:12px;color:var(--mut)">Caption — edit if you like</label>
+    <textarea id="shCap" style="width:100%;min-height:120px;border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;font-size:13px;margin:4px 0 10px">${esc(cap0)}</textarea>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <button class="btn p" id="shX">Share text to X</button>
+      <button class="btn s" id="shImg">Save milestone image</button>
+    </div>`);
+  const cap=()=>{ const t=$('#shCap'); return t?t.value:cap0; };
+  const xb=$('#shX'); if(xb) xb.onclick=()=>xIntent(cap());
+  const ib=$('#shImg'); if(ib) ib.onclick=()=>milestoneImage(ms,cap());
+}
+function milestoneImage(ms,caption){ const own=ownedCount(),total=CARDS.length;
+  const cv=document.createElement('canvas'); cv.width=1080; cv.height=1080; const x=cv.getContext('2d');
+  x.fillStyle='#0B3C5D'; x.fillRect(0,0,1080,1080); x.fillStyle='#0076B6'; x.fillRect(0,0,1080,18);
+  try{ x.drawImage(document.querySelector('header img'),70,64,168,168); }catch(e){}
+  x.textAlign='left'; x.fillStyle='#fff'; x.font='bold 52px Arial'; x.fillText('Barry Sanders',268,128);
+  x.fillStyle='#3aa7e0'; x.font='bold 44px Arial'; x.fillText('Collectors Hub',268,186);
+  x.textAlign='center'; x.fillStyle='#e8a900'; x.font='150px Arial'; x.fillText(ms.icon,540,470);
+  x.fillStyle='#8fc8ee'; x.font='bold 30px Arial'; x.fillText('MILESTONE UNLOCKED',540,556);
+  x.fillStyle='#fff'; x.font='bold 60px Arial'; _wrap(x,ms.title,540,650,900,66);
+  x.fillStyle='#c8d7e6'; x.font='36px Arial'; x.fillText(own.toLocaleString()+' of '+total.toLocaleString()+' cards owned',540,904);
+  const nm=collectorName(); if(nm){ x.fillStyle='#8fc8ee'; x.font='italic 34px Arial'; x.fillText('— '+nm,540,956); }
+  x.fillStyle='#89a6bb'; x.font='27px Arial'; x.fillText('barry-collectors-hub.pages.dev   ·   #BarrySanders',540,1032);
+  x.textAlign='left';
+  cv.toBlob(blob=>{ if(!blob){ toast('Could not create image'); return; } const file=new File([blob],'barry-milestone.png',{type:'image/png'});
+    if(navigator.canShare && navigator.canShare({files:[file]})){ navigator.share({files:[file],text:caption}).catch(()=>{}); }
+    else { const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='barry-milestone.png'; a.click(); toast('Milestone image saved ✔ — attach it to your post'); }
+  },'image/png');
+}
+
 /* ---------- Goals ---------- */
 function vGoals(){
+  const ms=MILESTONES(); const me=ms.filter(m=>m.earned).length;
+  const badges=`<div class="panel"><div class="ph">🏅 MILESTONES · ${me}/${ms.length} earned</div><div class="pb badges">`+
+    ms.map(m=>`<span class="mbadge ${m.earned?'on':''}"${m.earned?` data-ms="${m.k}" title="Share this to X"`:''}>${m.icon} ${esc(m.title)}${m.earned?' ↗':''}</span>`).join('')+
+    `</div></div>`;
   const gp=goalProgress(); const done=gp.filter(g=>g.done).length;
-  return `<h2 class="view">🎯 Goals & Badges</h2><div class="sub">${done} of ${gp.length} earned</div>
+  return `<h2 class="view">🎯 Goals & Badges</h2><div class="sub">${done} of ${gp.length} goals · ${me} of ${ms.length} milestones</div>
+  ${badges}
   ${gp.map((g,i)=>{
     const p=Math.min(100,Math.round(g.now/g.target*100));
     if(g.manual) return `<div class="goal manual ${g.done?'done':''}" data-mg="${i}"><div class="gt"><span>${g.done?'🏅 ':''}${g.name}</span><button class="mbtn">${g.done?'Earned ✓':'Mark done'}</button></div></div>`;
@@ -818,14 +1029,16 @@ function vGoals(){
 function vGuide(){
   return `<h2 class="view">📖 How to Use</h2>
   <div class="panel"><div class="ph">MARK YOUR CARDS</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
-   Tap the <b>+</b> on any card to mark it <b>owned</b> (it turns green and flows into your Collection & Dashboard). Tap the <b>★ stars</b> to set a want priority, pick a <b>grade</b>, set a <b>qty</b> (2+ lists it under Trades), and jot notes in the <b>Journal</b>. Everything saves automatically on this device.</div></div>
+   Tap the <b>+</b> on any card to mark it <b>owned</b> (it turns green and flows into your Collection & Dashboard). Tap the <b>★ stars</b> to set a want priority, pick a <b>grade</b>, set a <b>qty</b> (2+ lists it under Trades), and jot notes in the <b>Journal</b>. Open a card to add a <b>📷 photo</b> of your copy or an <b>🔗 image link</b>, and log what you <b>Paid</b> and its <b>Value</b>. Everything saves automatically on this device.</div></div>
+  <div class="panel"><div class="ph">TRACK PROGRESS, VALUE &amp; MILESTONES</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
+   The Dashboard's <b>🎯 Next Up</b> panel suggests what to chase next — the years, sets and goals you're closest to finishing. The <b>Value</b> tile opens your <b>Portfolio</b> (invested vs. estimated value, by era, plus your biggest cards). And as you hit <b>milestones</b> — your first autograph, 100 cards, a completed era — you'll get a celebration you can <b>share to X</b>; they all live under <b>Goals &amp; Badges</b>.</div></div>
   <div class="panel"><div class="ph">FIND CARDS</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
    <b>Years</b> browses one season at a time. <b>Search</b> looks across all ${CARDS.length.toLocaleString()} cards — filter by type, owned, grails, or print run (e.g. /10 or lower). <b>Grails</b> shows the ${CARDS.reduce((n,cd)=>n+(cd[GR]?1:0),0)} marquee cards. On the <b>Dashboard</b>, tap the <b>Owned</b>, <b>Grails</b> or <b>Goals</b> tiles to jump straight to those lists.</div></div>
   <div class="panel"><div class="ph">➕ ADD A CARD</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
    Got a card that isn't in the checklist — an oddball, an error, a brand-new release? Tap the blue <b>＋ button</b> (bottom-right), enter the year and set (card #, type, print run and notes are optional), and it's added straight to your collection. Your added cards show a <b>＋ Yours</b> tag and appear in Search, the year, and the Sets list like any other card. Open a card you added and use <b>🗑 Remove this card</b> to delete it — the checklist itself is never changed. Added cards are included in your backups (⋯ ▸ Export).</div></div>
   <div class="panel"><div class="ph">BACK UP &amp; RESTORE</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
    Your marks save automatically in this browser, and the Hub quietly keeps a rolling set of <b>snapshots</b> — open <b>⋯ ▸ Restore a previous version</b> to roll back to any earlier point (your current state is saved first, so it's always undoable). A big accidental drop is caught and you're asked before it sticks. For real safekeeping or to move to another phone or computer, use <b>⋯ ▸ Export</b> to download a backup file and <b>Import</b> to load one — backups carry a checksum, so a corrupted file is caught before it's applied. <b>Install</b> (⋯ ▸ Install / Add to Home Screen) puts the Hub on your home screen and works offline.</div></div>
-  <div class="foot">Barry Sanders Collectors Hub · V198 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
+  <div class="foot">Barry Sanders Collectors Hub · V199 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
 }
 
 /* ---------- filters ---------- */
@@ -930,6 +1143,7 @@ function wire(){
   document.querySelectorAll('[data-grail]').forEach(el=>el.onclick=()=>{ const f=CUR.view==='years'?yFilter:sFilter; f.grail=!f.grail; render(); });
   document.querySelectorAll('[data-rookie]').forEach(el=>el.onclick=()=>{ const f=CUR.view==='years'?yFilter:sFilter; f.rookie=!f.rookie; render(); });
   document.querySelectorAll('[data-set]').forEach(el=>el.onclick=()=>go('set', el.dataset.set));
+  document.querySelectorAll('[data-ms]').forEach(el=>el.onclick=()=>shareMilestone(el.dataset.ms));
   document.querySelectorAll('[data-sof]').forEach(el=>el.onclick=()=>{ setOwnFilter=el.dataset.sof; render(); });
   const bo=$('#bulkOwn'); if(bo) bo.onclick=()=>bulkMark(true);
   const bc=$('#bulkClear'); if(bc) bc.onclick=()=>bulkMark(false);
@@ -967,6 +1181,7 @@ document.getElementById('menuBtn').onclick=()=>{
    <div class="actions" style="margin-top:8px">
      <button class="btn s" id="mSnaps">⟲ Restore a previous version</button>
    </div>
+   <p id="photoMeter" style="font-size:11.5px;color:var(--mut);margin:8px 0 0">Photos are saved on this device and aren't in the .json backup.</p>
    <div class="actions" style="margin-top:14px">
      <button class="btn d" id="mReset">Reset all marks</button>
      <button class="btn s" id="mClose">Close</button>
@@ -983,6 +1198,7 @@ document.getElementById('menuBtn').onclick=()=>{
   $('#mFile').onchange=importMarks;
   $('#mExportCsv').onclick=exportCSV;
   $('#mSnaps').onclick=()=>{ closeModal(); showSnapshots(); };
+  updatePhotoMeter();
   $('#mImportCsv').onclick=()=>$('#mCsv').click();
   $('#mCsv').onchange=e=>{ const f=e.target.files[0]; e.target.value=''; if(f) importCSV(f); };
   $('#mReset').onclick=()=>{ if(confirm('Erase all owned/want/grade marks on this device? You\'ll get one chance to undo right after.')){ try{ localStorage.setItem('bs_hub_trash', JSON.stringify({marks:MARKS, goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}'), t:Date.now()})); }catch(e){} snapshotPush('before-reset'); MARKS={}; _guardBypass=true; saveMarks(); localStorage.removeItem('bs_hub_goals'); closeModal(); render(); toastUndo('All marks cleared', undoReset, 8000); } };
@@ -999,7 +1215,7 @@ function showSnapshots(){
 }
 function exportMarks(){
   const _m=runtimeToStore(MARKS);
-  const data={app:'BarrySandersCollectorsHub',ver:'V198',fmt:'id2',schema:2,exported:new Date().toISOString(),count:{o:_ownedCount(MARKS),w:_wantCount(MARKS)},sum:_sum(_m),marks:_m,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
+  const data={app:'BarrySandersCollectorsHub',ver:'V199',fmt:'id2',schema:2,exported:new Date().toISOString(),count:{o:_ownedCount(MARKS),w:_wantCount(MARKS)},sum:_sum(_m),marks:_m,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fileBase('collection')+'-'+new Date().toISOString().slice(0,10)+'.json'; a.click();
   try{ localStorage.setItem('bs_hub_lastbackup', String(ownedCount())); }catch(e){}
@@ -1292,6 +1508,7 @@ restoreState();
 (function(){ const h=location.hash.replace('#','').split('/'); if(h[0]){CUR.view=h[0]; if(h[1])CUR.year=+h[1];} })();
 maybeWelcome();
 maybePreloadUpdate();
+initMilestoneBaseline();   // record already-earned milestones silently so only NEW ones celebrate
 render();
 /* footer build stamp — lets you confirm at a glance which version a device is running */
 (function(){ var f=document.getElementById('appfoot'); if(!f) return;
@@ -1313,6 +1530,7 @@ render();
     }
     else { idbSave(); }
   }catch(e){}
+  try{ await photoLoadKeys(); if(PHOTOKEYS.size){ render(); } }catch(e){}   // reveal photo thumbnails once keys load
   requestPersist();
 })();
 </script>
