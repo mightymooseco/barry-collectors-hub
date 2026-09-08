@@ -114,6 +114,7 @@ input,select,textarea{font-size:16px}
 .mbadge{display:inline-flex;align-items:center;gap:4px;font-size:12.5px;padding:6px 10px;border-radius:999px;background:#eef1f5;color:#8a97a5;border:1px solid var(--line)}
 .mbadge.on{background:#fff6e0;color:#7a5a00;border-color:#f0d9a0;cursor:pointer;font-weight:600}
 .mbadge.on:hover{background:#ffeec4}
+.addsline{margin:-4px 2px 10px;font-size:12.5px;color:var(--lions);font-weight:600;cursor:pointer}
 .it-set{font-weight:700;font-size:14px;color:var(--navy)}
 .it-set .yr{color:var(--silver);font-weight:800;margin-right:2px;font-size:12px}
 .it-desc{font-size:12.5px;color:var(--mut);margin-top:2px;white-space:pre-line;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -338,7 +339,7 @@ const ERAS=[
 ];
 function eraOf(y){ return ERAS.find(e=>y>=e.lo&&y<=e.hi) || ERAS[ERAS.length-1]; }
 
-const APP_VER='V199';
+const APP_VER='V202';
 /* ---------- STATE (localStorage) ---------- */
 const LSKEY='bs_hub_marks_v1';
 const PRELOAD_MARKS = /*__PRELOAD__*/{}/*__ENDP__*/;
@@ -435,7 +436,8 @@ function setMark(id, patch){
 }
 /* set owned + manage an "added" timestamp (drives Recently Added / newest sort) */
 function markOwned(id, val, extra){
-  setMark(id, Object.assign({o:val}, extra||{}));
+  // marking owned clears any want-list flag so an owned card never lingers on the want list
+  setMark(id, Object.assign({o:val}, val?{w:0}:{}, extra||{}));
   if(val){ if(MARKS[id] && !MARKS[id].a){ MARKS[id].a = Date.now(); saveMarks(); } }
   else if(MARKS[id] && MARKS[id].a){ delete MARKS[id].a; saveMarks(); }
 }
@@ -449,6 +451,30 @@ const paidOf=id=>+m(id).paid||0;
 const valOf=id=>+m(id).val||0;
 function money(n){ return '$'+(Math.round(n*100)/100).toLocaleString(undefined,{minimumFractionDigits:(n%1?2:0),maximumFractionDigits:2}); }
 function portfolioTotals(){ let invested=0,estValue=0,nPaid=0,nVal=0; ownedIds().forEach(i=>{ const p=paidOf(i),v=valOf(i); if(p){invested+=p;nPaid++;} if(v){estValue+=v;nVal++;} }); return {invested,estValue,nPaid,nVal,net:estValue-invested}; }
+/* --- collecting growth (honest: only reflects cards dated since you started tracking) --- */
+function _addedDates(){ return ownedIds().map(i=>addedAt(i)).filter(t=>t>0).sort((a,b)=>a-b); }
+function addsInLastDays(days){ const cut=Date.now()-days*86400000; return _addedDates().filter(t=>t>=cut).length; }
+function _distinctWeeks(d){ const W=604800000; return new Set(d.map(t=>Math.floor(t/W))).size; }
+function growthSparkSVG(){ const d=_addedDates(); if(_distinctWeeks(d)<3) return '';   // only when there's genuine week-to-week history
+  const first=d[0], last=d[d.length-1]; const span=Math.max(1,last-first); const max=d.length;
+  const w=680,h=120,pad=6,N=48; let path='';
+  for(let k=0;k<=N;k++){ const t=first+span*k/N; let c=0; for(let j=0;j<d.length;j++){ if(d[j]<=t)c++; else break; }
+    const x=pad+(k/N)*(w-2*pad), y=h-pad-(c/max)*(h-2*pad); path+=(k?'L':'M')+x.toFixed(1)+','+y.toFixed(1)+' '; }
+  const area=path+`L${w-pad},${h-pad} L${pad},${h-pad} Z`;
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="118" preserveAspectRatio="none" style="margin-top:8px;display:block">
+    <path d="${area}" fill="rgba(0,118,182,0.13)"/><path d="${path}" fill="none" stroke="#0076B6" stroke-width="3" vector-effect="non-scaling-stroke"/></svg>`;
+}
+function growthPanel(){ if(!ownedCount()) return ''; const d=_addedDates();
+  if(!d.length) return `<div class="panel"><div class="ph">📈 COLLECTING</div><div class="pb" style="padding:12px 14px;font-size:13px;color:var(--mut)">As you mark cards owned, your recent pickups show here — newest activity first.</div></div>`;
+  const d30=addsInLastDays(30), d7=addsInLastDays(7);
+  const since=new Date(d[0]).toLocaleDateString(undefined,{month:'short',year:'numeric'});
+  const spark=growthSparkSVG();
+  return `<div class="panel"><div class="ph">📈 COLLECTING</div><div class="pb" style="padding:12px 14px">
+    <div style="font-size:14px"><b>＋${d30}</b> in the last 30 days · <b>＋${d7}</b> this week</div>
+    <div style="font-size:12px;color:var(--mut);margin-top:2px">Tracking since ${since} · ${d.length.toLocaleString()} dated pickup${d.length===1?'':'s'}</div>
+    ${spark}${spark?'<div style="font-size:11px;color:var(--mut);margin-top:2px">Cards owned over time — since you started tracking</div>':''}
+  </div></div>`;
+}
 
 /* ---------- derived helpers ---------- */
 const ownedIds=()=>Object.keys(MARKS).filter(id=>MARKS[id].o).map(Number);
@@ -457,7 +483,7 @@ const findCard=(o)=>{ for(let i=0;i<CARDS.length;i++){const c=CARDS[i]; if(c[Y]=
 
 /* ---------- routing ---------- */
 const VIEWS=[['dashboard','Dashboard'],['guide','Guide'],['search','Search'],['years','Years'],['collection','Collection'],
- ['recent','Recent'],['wants','Want List'],['trades','Trades'],['grails','Grails'],['sets','Sets'],['goals','Goals']];
+ ['wants','Want List'],['grails','Grails'],['sets','Sets'],['goals','Goals']];
 function buildNav(){
   const nav=document.getElementById('nav');
   nav.innerHTML=VIEWS.map(v=>`<button data-v="${v[0]}">${v[1]}<span class="ncount" data-nc="${v[0]}"></span></button>`).join('');
@@ -469,7 +495,7 @@ function updateNav(){
   set('collection', ownedCount()||''); set('wants', wc||''); set('grails', gc||'');
 }
 let CUR={view:'dashboard',year:null,setName:null};
-function go(view,arg){ CUR.view=view; if(view==='years'&&arg)CUR.year=arg; if(view==='set'&&arg){CUR.setName=arg; setOwnFilter='';} location.hash=view+(view==='years'&&CUR.year?('/'+CUR.year):''); render(); }
+function go(view,arg){ CUR.view=view; if(view==='collection') collMode='all'; if(view==='years'&&arg)CUR.year=arg; if(view==='set'&&arg){CUR.setName=arg; setOwnFilter='';} location.hash=view+(view==='years'&&CUR.year?('/'+CUR.year):''); render(); }
 window.go=go;
 window.addEventListener('hashchange',()=>{ const h=location.hash.replace('#','').split('/'); if(h[0]){CUR.view=h[0]; if(h[1])CUR.year=+h[1];} render(); });
 /* remember where you were + your filters/sort across reloads */
@@ -488,7 +514,7 @@ function render(){
   if(CUR.view==='set' && !CUR.setName) CUR.view='sets';
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===CUR.view||(CUR.view==='set'&&b.dataset.v==='sets')));
   const el=document.getElementById('main'); el.scrollTop=0;
-  const fn={dashboard:vDash,years:vYear,search:vSearch,collection:vCollection,recent:vRecent,wants:vWants,trades:vTrades,grails:vGrails,sets:vSets,set:vSet,goals:vGoals,portfolio:vPortfolio,guide:vGuide}[CUR.view]||vDash;
+  const fn={dashboard:vDash,years:vYear,search:vSearch,collection:vCollection,recent:vRecent,wants:vWants,trades:vTradesAlias,grails:vGrails,sets:vSets,set:vSet,goals:vGoals,portfolio:vPortfolio,guide:vGuide}[CUR.view]||vDash;
   el.innerHTML=fn();
   wire();
   updateNav();
@@ -567,7 +593,7 @@ function showMore(){
 /* list wiring — attached ONCE to #main; delegation survives re-renders */
 function inCurrentList(id){
   const c=CARDS[id];
-  if(CUR.view==='collection') return owned(id);
+  if(CUR.view==='collection'){ if(collMode==='trade') return qtyOf(id)>=2; if(collMode==='recent') return owned(id)&&addedAt(id)>0; return owned(id); }
   if(CUR.view==='wants') return wantOf(id)>0 && !owned(id);
   if(CUR.view==='trades') return qtyOf(id)>=2;
   if(CUR.view==='grails'){ if(!c[GR])return false; if(grailOwnFilter==='y')return owned(id); if(grailOwnFilter==='n')return !owned(id); return true; }
@@ -588,7 +614,7 @@ function wireList(container){
     if(e.target.closest('[data-own]')){
       const now=!owned(id); markOwned(id,now);
       if(!inCurrentList(id)){ item.remove(); refreshCount(); }
-      else { item.classList.toggle('owned',now); const b=item.querySelector('[data-own]'); b.classList.toggle('on',now); b.textContent=now?'✔':'+'; }
+      else { item.classList.toggle('owned',now); const b=item.querySelector('[data-own]'); b.classList.toggle('on',now); b.textContent=now?'✔':'+'; if(now){ const st=item.querySelector('[data-star]'); if(st) st.innerHTML=star_spans(0); } }
       updateNav(); toast(now?'Added to collection ✔':'Removed'); if(now) checkMilestones();
     } else if(e.target.closest('[data-sv]')){
       const v=+e.target.dataset.sv; const nw=wantOf(id)===v?0:v; setMark(id,{w:nw});
@@ -641,6 +667,7 @@ function vDash(){
     <div class="stat tap" role="button" tabindex="0" onclick="go('goals')" title="View your goals"><div class="n">${goalsDone}/${gp.length}</div><div class="l">Goals ›</div></div>
     <div class="stat tap" role="button" tabindex="0" onclick="go('portfolio')" title="View your portfolio"><div class="n">${money((portfolioTotals().estValue)||portfolioTotals().invested)}</div><div class="l">Value ›</div></div>
   </div>
+  ${(function(){const a=addsInLastDays(30); return a>0?`<div class="addsline" onclick="go('portfolio')">＋${a} added in the last 30 days ›</div>`:'';})()}
   ${nextUp()}
   <div class="row2">
     <div class="panel"><div class="ph">📅 COMPLETION BY YEAR</div><div class="pb" style="max-height:420px;overflow:auto">${yrRows}</div></div>
@@ -695,6 +722,7 @@ function vPortfolio(){
   const pf=portfolioTotals(); const own=ownedIds();
   if(!pf.nPaid && !pf.nVal){
     return `<h2 class="view">💰 Portfolio</h2>
+    ${growthPanel()}
     <div class="panel"><div class="pb" style="padding:16px;font-size:13.5px;color:var(--mut)">
       No values logged yet. Open any owned card and fill in <b>Paid $</b> (what you paid) and/or <b>Value $</b> (what it's worth now). Your totals — invested, estimated value, and gain/loss — will build here, broken down by era and your biggest cards.</div></div>`;
   }
@@ -707,6 +735,7 @@ function vPortfolio(){
   let topRows=top.map(i=>{ const c=CARDS[i]; const g=paidOf(i)?(valOf(i)-paidOf(i)):0; const gs=paidOf(i)?` <span class="num ${g>=0?'up':'down'}">${g>=0?'+':'−'}${money(Math.abs(g))}</span>`:'';
     return `<div class="prow"><div class="pl">${c[Y]} ${esc(c[S])}${c[N]?` #${esc(c[N])}`:''}${gs}</div><div class="pv">${money(valOf(i))}</div><div class="bar" style="visibility:hidden"></div><div class="pct"></div></div>`; }).join('');
   return `<h2 class="view">💰 Portfolio</h2>
+  ${growthPanel()}
   <div class="stats">
     <div class="stat"><div class="n">${money(pf.invested)}</div><div class="l">Invested (${pf.nPaid})</div></div>
     <div class="stat"><div class="n">${money(pf.estValue)}</div><div class="l">Est. value (${pf.nVal})</div></div>
@@ -783,27 +812,41 @@ function liveListUpdate(){
 }
 
 /* ---------- Collection / Wants / Trades / Grails ---------- */
+let collMode='all';   // all | recent | trade
 function vCollection(){
-  let ids=ownedIds().sort((a,b)=>CARDS[a][Y]-CARDS[b][Y]||CARDS[a][S].localeCompare(CARDS[b][S]));
-  return listView('✔ My Collection',`${ids.length} cards you own`,ids,'You haven\'t marked any cards owned yet. Tap + on any card to add it.');
-}
-function vRecent(){
-  let ids=ownedIds().filter(i=>addedAt(i)>0).sort((a,b)=>addedAt(b)-addedAt(a));
-  const n=ids.length;
-  const empty = ownedCount()>0
-    ? 'Cards you mark owned from now on show here, newest first. (Cards added before this update don\'t have a date yet.)'
-    : 'Nothing yet. As you mark cards owned, your latest pickups appear here — newest first.';
-  return `<h2 class="view">🕒 Recently Added</h2><div class="sub">Your latest pickups, newest first</div>
-  <div class="count">${n.toLocaleString()} card${n===1?'':'s'}</div>
+  const chips=`<div class="tools" style="position:static;top:auto">
+    <span class="chip ${collMode==='all'?'on':''}" data-coll="all">All</span>
+    <span class="chip ${collMode==='recent'?'on':''}" data-coll="recent">🕒 Recently added</span>
+    <span class="chip ${collMode==='trade'?'on':''}" data-coll="trade">🔁 For trade</span>
+  </div>`;
+  let ids, sub, empty, share='';
+  if(collMode==='recent'){
+    ids=ownedIds().filter(i=>addedAt(i)>0).sort((a,b)=>addedAt(b)-addedAt(a));
+    sub='Your latest pickups, newest first';
+    empty=ownedCount()>0?'Cards you mark owned from now on show here, newest first.':'Nothing yet. As you mark cards owned, your latest pickups appear here.';
+  } else if(collMode==='trade'){
+    ids=CARDS.map((c,i)=>i).filter(i=>qtyOf(i)>=2).sort((a,b)=>qtyOf(b)-qtyOf(a)||CARDS[a][Y]-CARDS[b][Y]);
+    sub='Cards where you own 2+ (spares to trade)';
+    empty='No duplicates. Set a QTY of 2 or more on a card to list spares here.';
+    share=ids.length?`<div class="bulkrow"><button class="btn s" id="shareTrades">↗ Share trade list to X</button></div>`:'';
+  } else {
+    ids=ownedIds().sort((a,b)=>CARDS[a][Y]-CARDS[b][Y]||CARDS[a][S].localeCompare(CARDS[b][S]));
+    sub=`${ids.length.toLocaleString()} cards you own`;
+    empty='You haven\'t marked any cards owned yet. Tap + on any card to add it.';
+  }
+  return `<h2 class="view">✔ My Collection</h2><div class="sub">${sub}</div>
+  ${chips}${share}<div class="count">${ids.length.toLocaleString()} cards</div>
   <div id="list">${listHTML(ids,empty)}</div>`;
 }
+/* Recent & Trades are folded into Collection as chips; these aliases keep old #recent/#trades links working */
+function vRecent(){ collMode='recent'; return vCollection(); }
+function vTradesAlias(){ collMode='trade'; return vCollection(); }
 function vWants(){
   let ids=CARDS.map((c,i)=>i).filter(i=>wantOf(i)>0 && !owned(i)).sort((a,b)=>wantOf(b)-wantOf(a)||CARDS[a][Y]-CARDS[b][Y]);
-  return listView('★ Want List','Cards you\'re chasing · ★★★ high priority first',ids,'No wants yet. Tap the ★ stars on any card to add it to your chase list.');
-}
-function vTrades(){
-  let ids=CARDS.map((c,i)=>i).filter(i=>qtyOf(i)>=2).sort((a,b)=>qtyOf(b)-qtyOf(a));
-  return listView('🔁 Trade List','Cards where you own 2+ (spares to trade)',ids,'No duplicates. Set a QTY of 2 or more on a card to list spares here.');
+  const share=ids.length?`<div class="bulkrow"><button class="btn s" id="shareWants">↗ Share want list to X</button></div>`:'';
+  return `<h2 class="view">★ Want List</h2><div class="sub">Cards you're chasing · ★★★ high priority first</div>
+  ${share}<div class="count">${ids.length.toLocaleString()} cards</div>
+  <div id="list">${listHTML(ids,'No wants yet. Tap the ★ stars on any card to add it to your chase list.')}</div>`;
 }
 function vGrails(){
   let ids=CARDS.map((c,i)=>i).filter(i=>CARDS[i][GR]);
@@ -932,6 +975,53 @@ function shareCard(id){
   const xb=$('#shX'); if(xb) xb.onclick=()=>xIntent(cap());
 }
 
+/* ---------- share a want / trade list (to X / anywhere) ---------- */
+function _listIds(kind){
+  if(kind==='trades') return CARDS.map((c,i)=>i).filter(i=>qtyOf(i)>=2).sort((a,b)=>qtyOf(b)-qtyOf(a)||CARDS[a][Y]-CARDS[b][Y]);
+  return CARDS.map((c,i)=>i).filter(i=>wantOf(i)>0&&!owned(i)).sort((a,b)=>wantOf(b)-wantOf(a)||CARDS[a][Y]-CARDS[b][Y]);
+}
+function _cardShort(i){ const c=CARDS[i]; return c[Y]+' '+c[S]+(c[N]?' #'+c[N]:''); }
+function _ellip(x,t,maxW){ if(x.measureText(t).width<=maxW)return t; while(t.length>4&&x.measureText(t+'…').width>maxW)t=t.slice(0,-1); return t+'…'; }
+function listCaption(kind){ const ids=_listIds(kind); const nm=collectorName(); const tag=nm?(' — '+nm):'';
+  const top=ids.slice(0,5).map(i=>'• '+_cardShort(i)+(kind==='wants'&&wantOf(i)===3?' ⭐':'')).join('\n');
+  const more=ids.length>5?`\n…and ${ids.length-5} more`:'';
+  if(kind==='trades') return `🔁 Barry Sanders cards I have for trade${tag}:\n\n${top}${more}\n\nDMs open 👀 → ${shareHub()}\n#BarrySanders #TheHobby #StillCollecting`;
+  return `👀 Top of my Barry Sanders want list${tag}:\n\n${top}${more}\n\nAnyone holding? → ${shareHub()}\n#BarrySanders #StillCollecting`;
+}
+function listImage(kind,caption){ const ids=_listIds(kind);
+  const cv=document.createElement('canvas'); cv.width=1080; cv.height=1350; const x=cv.getContext('2d');
+  x.fillStyle='#0B3C5D'; x.fillRect(0,0,1080,1350); x.fillStyle='#0076B6'; x.fillRect(0,0,1080,18);
+  try{ x.drawImage(document.querySelector('header img'),60,56,128,128); }catch(e){}
+  x.fillStyle='#fff'; x.font='bold 46px Arial'; x.fillText('Barry Sanders',206,102);
+  x.fillStyle='#3aa7e0'; x.font='bold 38px Arial'; x.fillText(kind==='trades'?'For Trade':'Want List',206,150);
+  const nm=collectorName(); if(nm){ x.fillStyle='#8fc8ee'; x.font='italic 30px Arial'; x.fillText('— '+nm,206,192); }
+  let yy=300; const rows=ids.slice(0,14);
+  rows.forEach(i=>{ const c=CARDS[i];
+    x.fillStyle='#e8a900'; x.font='bold 30px Arial'; x.fillText(String(c[Y]),70,yy);
+    x.fillStyle='#fff'; x.font='30px Arial'; x.fillText(_ellip(x,c[S]+(c[N]?' #'+c[N]:''),700),182,yy);
+    x.fillStyle='#8fc8ee'; x.font='26px Arial'; x.fillText(kind==='trades'?('×'+qtyOf(i)):'★'.repeat(wantOf(i)),930,yy);
+    yy+=48; });
+  if(ids.length>rows.length){ x.fillStyle='#c8d7e6'; x.font='italic 28px Arial'; x.fillText('…and '+(ids.length-rows.length)+' more',70,yy+6); }
+  x.fillStyle='#89a6bb'; x.font='27px Arial'; x.fillText('barry-collectors-hub.pages.dev   ·   #BarrySanders',70,1302);
+  cv.toBlob(blob=>{ if(!blob){ toast('Could not create image'); return; } const file=new File([blob],'barry-'+kind+'.png',{type:'image/png'});
+    if(navigator.canShare && navigator.canShare({files:[file]})){ navigator.share({files:[file],text:caption}).catch(()=>{}); }
+    else { const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='barry-'+kind+'.png'; a.click(); toast('List image saved ✔ — attach it to your post'); }
+  },'image/png');
+}
+function shareList(kind){ const ids=_listIds(kind); if(!ids.length){ toast(kind==='trades'?'No trade cards yet':'No wants yet'); return; }
+  const cap0=listCaption(kind);
+  showModal(`<h3>${kind==='trades'?'🔁 Share trade list':'★ Share want list'}</h3>
+    <label style="font-size:12px;color:var(--mut)">Caption — edit if you like</label>
+    <textarea id="shCap" style="width:100%;min-height:150px;border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;font-size:13px;margin:4px 0 10px">${esc(cap0)}</textarea>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <button class="btn p" id="shX">Share text to X</button>
+      <button class="btn s" id="shImg">Save list image</button>
+    </div>`);
+  const cap=()=>{ const t=$('#shCap'); return t?t.value:cap0; };
+  const xb=$('#shX'); if(xb) xb.onclick=()=>xIntent(cap());
+  const ib=$('#shImg'); if(ib) ib.onclick=()=>listImage(kind,cap());
+}
+
 /* ---------- Milestones (celebratory + shareable to X) ---------- */
 function MILESTONES(){
   const own=ownedCount();
@@ -1031,14 +1121,14 @@ function vGuide(){
   <div class="panel"><div class="ph">MARK YOUR CARDS</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
    Tap the <b>+</b> on any card to mark it <b>owned</b> (it turns green and flows into your Collection & Dashboard). Tap the <b>★ stars</b> to set a want priority, pick a <b>grade</b>, set a <b>qty</b> (2+ lists it under Trades), and jot notes in the <b>Journal</b>. Open a card to add a <b>📷 photo</b> of your copy or an <b>🔗 image link</b>, and log what you <b>Paid</b> and its <b>Value</b>. Everything saves automatically on this device.</div></div>
   <div class="panel"><div class="ph">TRACK PROGRESS, VALUE &amp; MILESTONES</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
-   The Dashboard's <b>🎯 Next Up</b> panel suggests what to chase next — the years, sets and goals you're closest to finishing. The <b>Value</b> tile opens your <b>Portfolio</b> (invested vs. estimated value, by era, plus your biggest cards). And as you hit <b>milestones</b> — your first autograph, 100 cards, a completed era — you'll get a celebration you can <b>share to X</b>; they all live under <b>Goals &amp; Badges</b>.</div></div>
+   The Dashboard's <b>🎯 Next Up</b> panel suggests what to chase next — the years, sets and goals you're closest to finishing. The <b>Value</b> tile opens your <b>Portfolio</b> (invested vs. estimated value, by era, your biggest cards, and your recent collecting activity). And as you hit <b>milestones</b> — your first autograph, 100 cards, a completed era — you'll get a celebration you can <b>share to X</b>; they all live under <b>Goals &amp; Badges</b>. From your <b>Want List</b> and <b>Trade List</b> you can also post a shareable list to X to find cards and make deals.</div></div>
   <div class="panel"><div class="ph">FIND CARDS</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
    <b>Years</b> browses one season at a time. <b>Search</b> looks across all ${CARDS.length.toLocaleString()} cards — filter by type, owned, grails, or print run (e.g. /10 or lower). <b>Grails</b> shows the ${CARDS.reduce((n,cd)=>n+(cd[GR]?1:0),0)} marquee cards. On the <b>Dashboard</b>, tap the <b>Owned</b>, <b>Grails</b> or <b>Goals</b> tiles to jump straight to those lists.</div></div>
   <div class="panel"><div class="ph">➕ ADD A CARD</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
    Got a card that isn't in the checklist — an oddball, an error, a brand-new release? Tap the blue <b>＋ button</b> (bottom-right), enter the year and set (card #, type, print run and notes are optional), and it's added straight to your collection. Your added cards show a <b>＋ Yours</b> tag and appear in Search, the year, and the Sets list like any other card. Open a card you added and use <b>🗑 Remove this card</b> to delete it — the checklist itself is never changed. Added cards are included in your backups (⋯ ▸ Export).</div></div>
   <div class="panel"><div class="ph">BACK UP &amp; RESTORE</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
    Your marks save automatically in this browser, and the Hub quietly keeps a rolling set of <b>snapshots</b> — open <b>⋯ ▸ Restore a previous version</b> to roll back to any earlier point (your current state is saved first, so it's always undoable). A big accidental drop is caught and you're asked before it sticks. For real safekeeping or to move to another phone or computer, use <b>⋯ ▸ Export</b> to download a backup file and <b>Import</b> to load one — backups carry a checksum, so a corrupted file is caught before it's applied. <b>Install</b> (⋯ ▸ Install / Add to Home Screen) puts the Hub on your home screen and works offline.</div></div>
-  <div class="foot">Barry Sanders Collectors Hub · V199 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
+  <div class="foot">Barry Sanders Collectors Hub · V202 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
 }
 
 /* ---------- filters ---------- */
@@ -1143,10 +1233,13 @@ function wire(){
   document.querySelectorAll('[data-grail]').forEach(el=>el.onclick=()=>{ const f=CUR.view==='years'?yFilter:sFilter; f.grail=!f.grail; render(); });
   document.querySelectorAll('[data-rookie]').forEach(el=>el.onclick=()=>{ const f=CUR.view==='years'?yFilter:sFilter; f.rookie=!f.rookie; render(); });
   document.querySelectorAll('[data-set]').forEach(el=>el.onclick=()=>go('set', el.dataset.set));
+  document.querySelectorAll('[data-coll]').forEach(el=>el.onclick=()=>{ collMode=el.dataset.coll; render(); });
   document.querySelectorAll('[data-ms]').forEach(el=>el.onclick=()=>shareMilestone(el.dataset.ms));
   document.querySelectorAll('[data-sof]').forEach(el=>el.onclick=()=>{ setOwnFilter=el.dataset.sof; render(); });
   const bo=$('#bulkOwn'); if(bo) bo.onclick=()=>bulkMark(true);
   const bc=$('#bulkClear'); if(bc) bc.onclick=()=>bulkMark(false);
+  const sw=$('#shareWants'); if(sw) sw.onclick=()=>shareList('wants');
+  const stl=$('#shareTrades'); if(stl) stl.onclick=()=>shareList('trades');
   document.querySelectorAll('[data-gf]').forEach(el=>el.onclick=()=>{ grailOwnFilter=el.dataset.gf; render(); });
   document.querySelectorAll('[data-mg]').forEach(el=>el.querySelector('.mbtn').onclick=()=>{ toggleManualGoal(+el.dataset.mg); render(); });
   const ib=$('#installBtn'); if(ib) ib.onclick=doInstall;
@@ -1215,7 +1308,7 @@ function showSnapshots(){
 }
 function exportMarks(){
   const _m=runtimeToStore(MARKS);
-  const data={app:'BarrySandersCollectorsHub',ver:'V199',fmt:'id2',schema:2,exported:new Date().toISOString(),count:{o:_ownedCount(MARKS),w:_wantCount(MARKS)},sum:_sum(_m),marks:_m,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
+  const data={app:'BarrySandersCollectorsHub',ver:'V202',fmt:'id2',schema:2,exported:new Date().toISOString(),count:{o:_ownedCount(MARKS),w:_wantCount(MARKS)},sum:_sum(_m),marks:_m,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fileBase('collection')+'-'+new Date().toISOString().slice(0,10)+'.json'; a.click();
   try{ localStorage.setItem('bs_hub_lastbackup', String(ownedCount())); }catch(e){}
