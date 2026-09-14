@@ -85,6 +85,8 @@ h2.view{font-size:20px;margin:6px 2px 12px;color:var(--navy);display:flex;align-
 .prow.erah .pl{color:#fff;font-weight:800;font-size:11.5px;letter-spacing:.5px}
 .prow.erah .pv{color:#cfe2f2;font-size:11px}
 .prow.erasub{background:#eaf1f8}
+.prow.tap{cursor:pointer}
+.prow.tap:active{opacity:.85}
 .prow.erasub .pl,.prow.erasub .pv{color:var(--navy)}
 /* toolbar / filters */
 .tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px;position:sticky;top:44px;z-index:10;background:var(--bg);padding:6px 0}
@@ -358,7 +360,7 @@ const ERAS=[
 ];
 function eraOf(y){ return ERAS.find(e=>y>=e.lo&&y<=e.hi) || ERAS[ERAS.length-1]; }
 
-const APP_VER='V218';
+const APP_VER='V223';
 /* ---------- STATE (localStorage) ---------- */
 const LSKEY='bs_hub_marks_v1';
 const PRELOAD_MARKS = /*__PRELOAD__*/{}/*__ENDP__*/;
@@ -399,6 +401,110 @@ function idbGet(key){ return (async()=>{ try{ const db=_idb||(_idb=await openIDB
 async function idbLoad(){ return idbGet(LSKEY); }
 async function idbLoadCustom(){ return idbGet(LSKEY+'_custom'); }
 async function requestPersist(){ try{ if(navigator.storage&&navigator.storage.persist){ if(!(await navigator.storage.persisted())) await navigator.storage.persist(); } }catch(e){} }
+
+/* ============================================================================
+   CROSS-DEVICE SYNC — optional. A short sync code is the only "login": anyone who has
+   the code can read/write that collection's synced state, so it's treated like a password,
+   not a secret worth heavy engineering. Whole-state, additive merge (reuses mergeMarks(),
+   the same safe merge already used for "Merge import"): owned/want marks are combined,
+   never removed by a sync — unmarking a card locally doesn't un-mark it elsewhere. A pull
+   always snapshots first and goes through the normal saveMarks() anti-wipe guard, so a bad
+   sync is always recoverable via ⋯ ▸ Restore a previous version.
+   ========================================================================== */
+const SYNC_API='https://bshub-sync.mightymooseco.workers.dev';
+function syncCode(){ return (localStorage.getItem('bs_sync_code')||'').trim(); }
+function syncRev(){ return +(localStorage.getItem('bs_sync_rev')||0); }
+function setSyncRev(r){ try{ localStorage.setItem('bs_sync_rev', String(r)); }catch(e){} }
+function genSyncCode(){
+  const AB='ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/I/L — easier to type from one device to another
+  let s=''; for(let i=0;i<10;i++){ if(i===4||i===8) s+='-'; s+=AB[Math.floor(Math.random()*AB.length)]; }
+  return s;
+}
+async function syncPull(){
+  const r=await fetch(SYNC_API+'/sync/'+encodeURIComponent(syncCode()));
+  if(!r.ok) throw new Error('pull failed: '+r.status);
+  return r.json();
+}
+async function syncPush(baseRev){
+  const r=await fetch(SYNC_API+'/sync/'+encodeURIComponent(syncCode()), {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ baseRev, marks: runtimeToStore(MARKS), custom: CUSTOM }),
+    keepalive:true
+  });
+  if(r.status===409){ return { conflict:true, current:(await r.json()).current }; }
+  if(!r.ok) throw new Error('push failed: '+r.status);
+  return r.json();
+}
+function _syncAdopt(state){
+  snapshotPush('before-sync');
+  mergeMarks(storeToRuntime(state.marks||{}));               // additive: never drops a local-only mark
+  (Array.isArray(state.custom)?state.custom:[]).forEach(row=>{
+    if(!Array.isArray(row)) return;
+    const sig=JSON.stringify(row);
+    if(!CUSTOM.some(r=>JSON.stringify(r)===sig)){ CUSTOM.push(row); CARDS.push(row); }
+  });
+  saveCustom();
+  setSyncRev(state.rev);
+  if(typeof render==='function') render();
+}
+let _syncBusy=false;
+async function syncNow(silent){
+  const code=syncCode();
+  if(!code){ if(!silent) toast('Set up sync first (⋯ ▸ Sync across devices)'); return; }
+  if(_syncBusy) return; _syncBusy=true;
+  try{
+    const server=await syncPull();
+    if(server.rev>syncRev()) _syncAdopt(server);
+    const mySum=_sum(runtimeToStore(MARKS));
+    const lastSum=localStorage.getItem('bs_sync_lastsum')||'';
+    if(mySum===lastSum && server.rev<=syncRev()){ if(!silent) toast('Already up to date'); return; }
+    const res=await syncPush(syncRev());
+    if(res && res.conflict){ _syncAdopt(res.current); if(!silent) toast('Synced — merged in a change from another device'); return; }
+    setSyncRev(res.rev);
+    try{ localStorage.setItem('bs_sync_lastsum', mySum); }catch(e){}
+    if(!silent) toast('Synced ✔');
+  }catch(e){ if(!silent) toast('Sync failed — check your connection'); }
+  finally{ _syncBusy=false; }
+}
+function setupSync(existingCode){
+  const code=(existingCode||genSyncCode()).toUpperCase();
+  try{ localStorage.setItem('bs_sync_code', code); }catch(e){}
+  setSyncRev(0);
+  try{ localStorage.removeItem('bs_sync_lastsum'); }catch(e){}
+  syncNow(false);
+}
+function stopSync(){
+  try{ localStorage.removeItem('bs_sync_code'); localStorage.removeItem('bs_sync_rev'); localStorage.removeItem('bs_sync_lastsum'); }catch(e){}
+  toast('Sync turned off on this device');
+}
+function syncModal(){
+  const code=syncCode();
+  if(!code){
+    showModal(`<h3>🔗 Sync across devices</h3>
+    <p style="font-size:13.5px">Get a short code on this device, then enter that same code on another phone or computer to link it. Marks are combined, never removed by syncing — unmarking a card here won't un-mark it elsewhere; do that on each device.</p>
+    <div class="actions">
+      <button class="btn p" id="syncNew">Get a new code for this device</button>
+      <button class="btn s" id="syncHave">I already have a code</button>
+    </div>`);
+    $('#syncNew').onclick=()=>{ closeModal(); setupSync(); };
+    $('#syncHave').onclick=()=>{ const c=prompt('Enter the sync code from your other device:'); if(c&&c.trim()){ closeModal(); setupSync(c.trim()); } };
+    return;
+  }
+  showModal(`<h3>🔗 Sync across devices</h3>
+  <p style="font-size:13.5px">This device syncs with code:</p>
+  <p style="font-size:20px;font-weight:800;letter-spacing:1px;font-family:monospace;background:var(--band);padding:10px;border-radius:8px;text-align:center">${esc(code)}</p>
+  <p style="font-size:12px;color:var(--mut)">Enter this same code on another device (⋯ ▸ Sync across devices ▸ I already have a code) to link it. Anyone with this code can read/write this synced collection — keep it private.</p>
+  <div class="actions">
+    <button class="btn p" id="syncGo">Sync now</button>
+    <button class="btn s" id="syncCopy">Copy code</button>
+  </div>
+  <div class="actions" style="margin-top:10px">
+    <button class="btn d" id="syncOff">Turn off sync on this device</button>
+  </div>`);
+  $('#syncGo').onclick=()=>{ closeModal(); syncNow(false); };
+  $('#syncCopy').onclick=()=>{ try{ navigator.clipboard.writeText(code); toast('Code copied'); }catch(e){ toast(code); } };
+  $('#syncOff').onclick=()=>{ if(confirm('Turn off sync on this device? Your marks stay as they are — this just stops linking with the code.')){ stopSync(); closeModal(); } };
+}
 
 /* ============================================================================
    CARD IMAGES — your own photos (compressed, in IndexedDB) + an optional image link.
@@ -522,6 +628,9 @@ function updateNav(){
   set('collection', ownedCount()||''); set('wants', wc||''); set('grails', gc||'');
 }
 let CUR={view:'dashboard',year:null,setName:null};
+let dashEraOpen={}, dashTypesExpanded=false;
+function toggleEraYears(name){ dashEraOpen[name] = !dashEraOpen[name]; render(); }
+function toggleDashTypes(){ dashTypesExpanded=!dashTypesExpanded; render(); }
 function go(view,arg){ CUR.view=view; if(view==='collection') collMode='all'; if(view==='years'&&arg)CUR.year=arg; if(view==='set'&&arg){CUR.setName=arg; setOwnFilter='';} location.hash=view+(view==='years'&&CUR.year?('/'+CUR.year):''); render(); }
 window.go=go;
 window.addEventListener('hashchange',()=>{ const h=location.hash.replace('#','').split('/'); if(h[0]){CUR.view=h[0]; if(h[1])CUR.year=+h[1];} render(); });
@@ -675,14 +784,33 @@ function vDash(){
   const grailTotal=CARDS.filter(c=>c[GR]).length, grailOwn=CARDS.reduce((n,c,i)=>n+((c[GR]&&owned(i))?1:0),0);
   const gp=goalProgress(); const goalsDone=gp.filter(g=>g.done).length;
   let yrRows='';
+  const eraData={}; let bestEra=null, bestOwned=-1;
   ERAS.forEach(era=>{
     const ey=years.filter(y=>y>=era.lo&&y<=era.hi); if(!ey.length)return;
     let eo=0,et=0; ey.forEach(y=>{eo+=byYear[y][0];et+=byYear[y][1];});
-    yrRows+=`<div class="prow erah"><div class="pl">▸ ${era.name.toUpperCase()}</div><div class="pv">${era.tag}</div><div class="bar" style="visibility:hidden"></div><div class="pct"></div></div>`;
-    ey.forEach(y=>{ const [o,t]=byYear[y]; yrRows+=prow(`<a href="#years/${y}" onclick="go('years',${y})">${y}</a>`,`${o} / ${t}`,pct(o,t)); });
-    yrRows+=`<div class="prow erasub"><div class="pl"><b>${era.short} total</b></div><div class="pv"><b>${eo} / ${et}</b></div><div class="bar"><i style="width:${pct(eo,et)}%"></i></div><div class="pct">${pct(eo,et)}%</div></div>`;
+    eraData[era.name]={ey,eo,et};
+    if(eo>bestOwned){ bestOwned=eo; bestEra=era.name; }
   });
-  let tyRows=typeOrder.filter(t=>byType[t]).map(t=>{ const [o,tt]=byType[t]; return prow(t,`${o} / ${tt}`,pct(o,tt)); }).join('');
+  ERAS.forEach(era=>{
+    const d=eraData[era.name]; if(!d)return; const {ey,eo,et}=d;
+    const open = (era.name in dashEraOpen) ? dashEraOpen[era.name] : (era.name===bestEra);
+    const tri = open?'▾':'▸';
+    yrRows+=`<div class="prow erah tap" role="button" tabindex="0" onclick="toggleEraYears('${era.name}')"><div class="pl">${tri} ${era.name.toUpperCase()}</div><div class="pv">${eo} / ${et}</div><div class="bar"><i style="width:${pct(eo,et)}%"></i></div><div class="pct">${pct(eo,et)}%</div></div>`;
+    if(open) ey.forEach(y=>{ const [o,t]=byYear[y]; yrRows+=prow(`<a href="#years/${y}" onclick="go('years',${y})">${y}</a>`,`${o} / ${t}`,pct(o,t)); });
+  });
+  /* card types: strongest progress first; weak/zero types tucked behind a toggle */
+  let tyEntries=typeOrder.filter(t=>byType[t]).map(t=>{ const [o,tt]=byType[t]; return {t,o,tt,p:pct(o,tt)}; });
+  tyEntries.sort((a,b)=>b.p-a.p || b.o-a.o);
+  const TY_SHOW=5;
+  const tyPrimary=tyEntries.slice(0,TY_SHOW), tySecondary=tyEntries.slice(TY_SHOW);
+  let tyRows=tyPrimary.map(e=>prow(e.t,`${e.o} / ${e.tt}`,e.p)).join('');
+  if(tySecondary.length){
+    const tOpen=!!dashTypesExpanded;
+    tyRows+=`<div class="prow tap" role="button" tabindex="0" onclick="toggleDashTypes()"><div class="pl" style="color:var(--mut)">${tOpen?'▾ Show fewer types':'▸ Show '+tySecondary.length+' more types'}</div><div class="pv"></div><div class="bar" style="visibility:hidden"></div><div class="pct"></div></div>`;
+    if(tOpen) tyRows+=tySecondary.map(e=>prow(e.t,`${e.o} / ${e.tt}`,e.p)).join('');
+  }
+  const pf=portfolioTotals();
+  const valDisp = (pf.nVal===0 && pf.nPaid===0) ? '—' : money(pf.estValue||pf.invested);
   return `<h2 class="view">📊 Dashboard</h2>
   ${installBar()}${iosHint()}${backupBar()}
   ${eraTrackers()}
@@ -692,21 +820,14 @@ function vDash(){
     <div class="stat tap" role="button" tabindex="0" onclick="go('collection')" title="View your collection"><div class="n">${pct(own,total)}%</div><div class="l">Completion ›</div></div>
     <div class="stat tap" role="button" tabindex="0" onclick="go('grails')" title="View your grails"><div class="n">${grailOwn}/${grailTotal}</div><div class="l">Grails ›</div></div>
     <div class="stat tap" role="button" tabindex="0" onclick="go('goals')" title="View your goals"><div class="n">${goalsDone}/${gp.length}</div><div class="l">Goals ›</div></div>
-    <div class="stat tap" role="button" tabindex="0" onclick="go('portfolio')" title="View your portfolio"><div class="n">${money((portfolioTotals().estValue)||portfolioTotals().invested)}</div><div class="l">Value ›</div></div>
+    <div class="stat tap" role="button" tabindex="0" onclick="go('portfolio')" title="View your portfolio"><div class="n">${valDisp}</div><div class="l">Value ›</div></div>
   </div>
   ${(function(){const a=addsInLastDays(30); return a>0?`<div class="addsline" onclick="go('portfolio')">＋${a} added in the last 30 days ›</div>`:'';})()}
   ${targetPanel()}
   ${nextUp()}
   <div class="row2">
     <div class="panel"><div class="ph">📅 COMPLETION BY YEAR</div><div class="pb" style="max-height:420px;overflow:auto">${yrRows}</div></div>
-    <div>
-      <div class="panel"><div class="ph">🃏 COMPLETION BY CARD TYPE</div><div class="pb">${tyRows}${prow('<b>TOTAL</b>',`<b>${own} / ${total}</b>`,pct(own,total))}</div></div>
-      <div class="panel"><div class="ph">🏆 CAREER HIGHLIGHTS</div><div class="pb chl">
-        ${chl('15,269','Rush yards','#4')}${chl('4.99','Yards / carry','#3')}${chl('99.8','Yards / game','#2')}
-        ${chl('18,190','Scrimmage yds','#6')}${chl('99','Rushing TDs','#10')}${chl('10','1,000-yд seasons','ALL')}
-        <div class="r" style="border:none;color:var(--mut);font-size:12px">2,000-yard season (1997) · 4× rushing champ · HOF 2004 (1st ballot)</div>
-      </div></div>
-    </div>
+    <div class="panel"><div class="ph">🃏 COMPLETION BY CARD TYPE</div><div class="pb">${tyRows}${prow('<b>TOTAL</b>',`<b>${own} / ${total}</b>`,pct(own,total))}</div></div>
   </div>`;
 }
 function prow(l,v,p){ return `<div class="prow"><div class="pl">${l}</div><div class="pv">${v}</div><div class="bar"><i style="width:${p}%"></i></div><div class="pct">${p}%</div></div>`; }
@@ -1207,7 +1328,14 @@ function vGuide(){
    Got a card that isn't in the checklist — an oddball, an error, a brand-new release? Tap the blue <b>＋ button</b> (bottom-right), enter the year and set (card #, type, print run and notes are optional), and it's added straight to your collection. Your added cards show a <b>＋ Yours</b> tag and appear in Search, the year, and the Sets list like any other card. Open a card you added and use <b>🗑 Remove this card</b> to delete it — the checklist itself is never changed. Added cards are included in your backups (⋯ ▸ Export).</div></div>
   <div class="panel"><div class="ph">BACK UP &amp; RESTORE</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
    Your marks save automatically in this browser, and the Hub quietly keeps a rolling set of <b>snapshots</b> — open <b>⋯ ▸ Restore a previous version</b> to roll back to any earlier point (your current state is saved first, so it's always undoable). A big accidental drop is caught and you're asked before it sticks. For real safekeeping or to move to another phone or computer, use <b>⋯ ▸ Export</b> to download a backup file and <b>Import</b> to load one — backups carry a checksum, so a corrupted file is caught before it's applied. <b>Install</b> (⋯ ▸ Install / Add to Home Screen) puts the Hub on your home screen and works offline.</div></div>
-  <div class="foot">Barry Sanders Collectors Hub · V218 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
+  <div class="panel"><div class="ph">🔗 SYNC ACROSS DEVICES</div><div class="pb" style="padding:12px 14px;font-size:13.5px">
+   Open <b>⋯ ▸ Sync across devices</b> to get a short code, then enter that same code on another phone or computer to link it — no account needed, the code is the key (keep it private). Syncing <b>combines</b> owned/want marks between devices; it never removes one, so unmarking a card on one device doesn't un-mark it on another — do that on each device. It runs quietly in the background (on open and when you switch away) and there's also a manual <b>Sync now</b> button.</div></div>
+  <div class="panel"><div class="ph">🏆 CAREER HIGHLIGHTS</div><div class="pb chl">
+   ${chl('15,269','Rush yards','#4')}${chl('4.99','Yards / carry','#3')}${chl('99.8','Yards / game','#2')}
+   ${chl('18,190','Scrimmage yds','#6')}${chl('99','Rushing TDs','#10')}${chl('10','1,000-yд seasons','ALL')}
+   <div class="r" style="border:none;color:var(--mut);font-size:12px">2,000-yard season (1997) · 4× rushing champ · HOF 2004 (1st ballot)</div>
+  </div></div>
+  <div class="foot">Barry Sanders Collectors Hub · V223 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
 }
 
 /* ---------- filters ---------- */
@@ -1349,6 +1477,7 @@ document.getElementById('menuBtn').onclick=()=>{
      <button class="btn s" id="mImport">⬆ Restore (.json)</button>
      <button class="btn s" id="mExportCsv">⬇ Export CSV</button>
      <button class="btn s" id="mImportCsv">⬆ Import CSV</button>
+     <button class="btn s" id="mSync">🔗 Sync across devices${syncCode()?' · on':''}</button>
    </div>
    <div class="actions" style="margin-top:8px">
      <button class="btn s" id="mSnaps">⟲ Restore a previous version</button>
@@ -1370,6 +1499,7 @@ document.getElementById('menuBtn').onclick=()=>{
   $('#mFile').onchange=importMarks;
   $('#mExportCsv').onclick=exportCSV;
   $('#mSnaps').onclick=()=>{ closeModal(); showSnapshots(); };
+  $('#mSync').onclick=()=>{ closeModal(); syncModal(); };
   updatePhotoMeter();
   $('#mImportCsv').onclick=()=>$('#mCsv').click();
   $('#mCsv').onchange=e=>{ const f=e.target.files[0]; e.target.value=''; if(f) importCSV(f); };
@@ -1387,7 +1517,7 @@ function showSnapshots(){
 }
 function exportMarks(){
   const _m=runtimeToStore(MARKS);
-  const data={app:'BarrySandersCollectorsHub',ver:'V218',fmt:'id2',schema:2,exported:new Date().toISOString(),count:{o:_ownedCount(MARKS),w:_wantCount(MARKS)},sum:_sum(_m),marks:_m,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
+  const data={app:'BarrySandersCollectorsHub',ver:'V223',fmt:'id2',schema:2,exported:new Date().toISOString(),count:{o:_ownedCount(MARKS),w:_wantCount(MARKS)},sum:_sum(_m),marks:_m,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fileBase('collection')+'-'+new Date().toISOString().slice(0,10)+'.json'; a.click();
   try{ localStorage.setItem('bs_hub_lastbackup', String(ownedCount())); }catch(e){}
@@ -1480,8 +1610,9 @@ function maybeWelcome(){
       <ul style="font-size:13px;color:var(--mut);line-height:1.7;padding-left:18px;margin:8px 0 10px">
         <li>Tap <b>＋</b> on a card to mark it <b>owned</b>; tap the ★ to add it to your want list.</li>
         <li>Browse by <b>Year</b> or <b>Era</b>, or use <b>Search</b> with filters and sort.</li>
+        <li>Set a <b>completion goal</b> on the Dashboard, and track your <b>Portfolio</b> value once you start logging what you paid.</li>
         <li>Got a card that's not in the checklist? Tap <b>＋</b> (bottom-right) to add your own.</li>
-        <li>Everything saves on this device — use <b>⋯ ▸ Export</b> now and then to keep a backup.</li>
+        <li>Everything saves on this device automatically — <b>⋯ ▸ Restore a previous version</b> undoes a mistake, and <b>⋯ ▸ Export</b> backs it up for safekeeping.</li>
       </ul>
       <button class="btn" id="wcGo" style="width:100%">Start collecting</button>`);
     const g=$('#wcGo'); if(g) g.onclick=()=>{ try{ localStorage.setItem('bs_hub_seen','1'); }catch(e){} closeModal(); };
@@ -1620,7 +1751,7 @@ function iosHint(){
 function backupBar(){
   const last=+(localStorage.getItem('bs_hub_lastbackup')||0); const cur=ownedCount(); const diff=cur-last;
   if(cur<1 || diff<20 || backupDismissed) return '';
-  return `<div class="instbar" style="background:#fff6e6;border-color:#f0d9a0"><span>💾 You've marked <b>${diff}</b> cards since your last backup. Export a copy so you never lose them if this browser clears its data.</span><button class="btn p" id="doBackup" style="padding:7px 12px">Export</button><button class="btn s" id="dismissBackup" style="padding:7px 10px">Later</button></div>`;
+  return `<div class="instbar" style="background:#fff6e6;border-color:#f0d9a0"><span>💾 You've marked <b>${diff}</b> cards since your last backup. Export a copy so you never lose them if this browser clears its data — or use ⋯ ▸ <b>Restore a previous version</b> anytime to undo a mistake.</span><button class="btn p" id="doBackup" style="padding:7px 12px">Export</button><button class="btn s" id="dismissBackup" style="padding:7px 10px">Later</button></div>`;
 }
 function isStandalone(){ try{ return (window.matchMedia&&window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone; }catch(e){ return false; } }
 function doInstall(){
@@ -1680,6 +1811,9 @@ restoreState();
 (function(){ const h=location.hash.replace('#','').split('/'); if(h[0]){CUR.view=h[0]; if(h[1])CUR.year=+h[1];} })();
 maybeWelcome();
 maybePreloadUpdate();
+if(syncCode()) setTimeout(()=>syncNow(true), 1200);
+document.addEventListener('visibilitychange',()=>{ if(document.hidden && syncCode()) syncNow(true); });
+window.addEventListener('pagehide',()=>{ if(syncCode()) syncNow(true); });
 initMilestoneBaseline();   // record already-earned milestones silently so only NEW ones celebrate
 render();
 /* footer build stamp — lets you confirm at a glance which version a device is running */
