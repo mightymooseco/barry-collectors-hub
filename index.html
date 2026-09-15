@@ -360,7 +360,7 @@ const ERAS=[
 ];
 function eraOf(y){ return ERAS.find(e=>y>=e.lo&&y<=e.hi) || ERAS[ERAS.length-1]; }
 
-const APP_VER='V223';
+const APP_VER='V224';
 /* ---------- STATE (localStorage) ---------- */
 const LSKEY='bs_hub_marks_v1';
 const PRELOAD_MARKS = /*__PRELOAD__*/{}/*__ENDP__*/;
@@ -448,6 +448,8 @@ function _syncAdopt(state){
   if(typeof render==='function') render();
 }
 let _syncBusy=false;
+function markSynced(){ try{ localStorage.setItem('bs_sync_lastat', String(Date.now())); }catch(e){} }
+function lastSyncedText(){ const t=+localStorage.getItem('bs_sync_lastat')||0; return t? ('Last synced '+timeAgo(t)) : 'Not synced yet on this device'; }
 async function syncNow(silent){
   const code=syncCode();
   if(!code){ if(!silent) toast('Set up sync first (⋯ ▸ Sync across devices)'); return; }
@@ -457,11 +459,12 @@ async function syncNow(silent){
     if(server.rev>syncRev()) _syncAdopt(server);
     const mySum=_sum(runtimeToStore(MARKS));
     const lastSum=localStorage.getItem('bs_sync_lastsum')||'';
-    if(mySum===lastSum && server.rev<=syncRev()){ if(!silent) toast('Already up to date'); return; }
+    if(mySum===lastSum && server.rev<=syncRev()){ markSynced(); if(!silent) toast('Already up to date'); return; }
     const res=await syncPush(syncRev());
-    if(res && res.conflict){ _syncAdopt(res.current); if(!silent) toast('Synced — merged in a change from another device'); return; }
+    if(res && res.conflict){ _syncAdopt(res.current); markSynced(); if(!silent) toast('Synced — merged in a change from another device'); return; }
     setSyncRev(res.rev);
     try{ localStorage.setItem('bs_sync_lastsum', mySum); }catch(e){}
+    markSynced();
     if(!silent) toast('Synced ✔');
   }catch(e){ if(!silent) toast('Sync failed — check your connection'); }
   finally{ _syncBusy=false; }
@@ -485,14 +488,23 @@ function syncModal(){
     <div class="actions">
       <button class="btn p" id="syncNew">Get a new code for this device</button>
       <button class="btn s" id="syncHave">I already have a code</button>
+    </div>
+    <div id="syncEnter" class="hidden" style="margin-top:10px">
+      <input type="text" id="syncCodeInput" placeholder="Enter code from your other device" autocapitalize="characters" style="width:100%;box-sizing:border-box;text-transform:uppercase;font-family:monospace;letter-spacing:1px;border:1px solid var(--line);border-radius:8px;padding:9px;font-size:15px;font-weight:600;color:var(--ink);background:var(--card)">
+      <div class="actions" style="margin-top:8px">
+        <button class="btn p" id="syncConnect">Connect</button>
+      </div>
     </div>`);
     $('#syncNew').onclick=()=>{ closeModal(); setupSync(); };
-    $('#syncHave').onclick=()=>{ const c=prompt('Enter the sync code from your other device:'); if(c&&c.trim()){ closeModal(); setupSync(c.trim()); } };
+    $('#syncHave').onclick=()=>{ $('#syncHave').classList.add('hidden'); $('#syncEnter').classList.remove('hidden'); $('#syncCodeInput').focus(); };
+    $('#syncConnect').onclick=()=>{ const c=$('#syncCodeInput').value.trim(); if(c){ closeModal(); setupSync(c); } };
+    $('#syncCodeInput').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); $('#syncConnect').click(); } });
     return;
   }
   showModal(`<h3>🔗 Sync across devices</h3>
   <p style="font-size:13.5px">This device syncs with code:</p>
   <p style="font-size:20px;font-weight:800;letter-spacing:1px;font-family:monospace;background:var(--band);padding:10px;border-radius:8px;text-align:center">${esc(code)}</p>
+  <p style="font-size:12px;color:var(--mut)">${esc(lastSyncedText())}</p>
   <p style="font-size:12px;color:var(--mut)">Enter this same code on another device (⋯ ▸ Sync across devices ▸ I already have a code) to link it. Anyone with this code can read/write this synced collection — keep it private.</p>
   <div class="actions">
     <button class="btn p" id="syncGo">Sync now</button>
@@ -576,6 +588,7 @@ function markOwned(id, val, extra){
 }
 const addedAt=id=>m(id).a||0;
 function fmtDate(ts){ try{ return new Date(ts).toLocaleDateString(undefined,{month:'short',day:'numeric',year:(new Date(ts).getFullYear()!==new Date().getFullYear()?'numeric':undefined)}); }catch(e){ return ''; } }
+function timeAgo(ts){ if(!ts) return ''; const s=Math.floor((Date.now()-ts)/1000); if(s<60) return 'just now'; const m=Math.floor(s/60); if(m<60) return m+'m ago'; const h=Math.floor(m/60); if(h<24) return h+'h ago'; const d=Math.floor(h/24); if(d<7) return d+'d ago'; return fmtDate(ts); }
 const owned=id=>!!m(id).o;
 const wantOf=id=>m(id).w||0;
 const gradeOf=id=>m(id).g||'';
@@ -1335,7 +1348,7 @@ function vGuide(){
    ${chl('18,190','Scrimmage yds','#6')}${chl('99','Rushing TDs','#10')}${chl('10','1,000-yд seasons','ALL')}
    <div class="r" style="border:none;color:var(--mut);font-size:12px">2,000-yard season (1997) · 4× rushing champ · HOF 2004 (1st ballot)</div>
   </div></div>
-  <div class="foot">Barry Sanders Collectors Hub · V223 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
+  <div class="foot">Barry Sanders Collectors Hub · V224 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
 }
 
 /* ---------- filters ---------- */
@@ -1465,22 +1478,24 @@ document.getElementById('menuBtn').onclick=()=>{
   const own=ownedCount(); const nm=collectorName();
   showModal(`<h3>Menu</h3>
    <p>${own.toLocaleString()} cards owned on this device${nm?` · <b>${esc(nm)}</b>`:''}.</p>
+   <p style="font-size:12px;color:var(--mut);margin:2px 0 4px;font-weight:700">ACCOUNT</p>
    <div class="actions">
      <button class="btn p" id="mShare">📸 Share my stats</button>
      <button class="btn s" id="mName">✏️ ${nm?'Edit name':'Set name'}</button>
      <button class="btn s" id="mDark">${localStorage.getItem('bs_hub_theme')==='dark'?'☀️ Light mode':'🌙 Dark mode'}</button>
      <button class="btn s" id="mInstall">📲 Install app</button>
    </div>
-   <p style="font-size:12px;color:var(--mut);margin:14px 0 4px;font-weight:700">BACK UP &amp; TRANSFER</p>
+   <p style="font-size:12px;color:var(--mut);margin:14px 0 4px;font-weight:700">BACKUP &amp; TRANSFER</p>
    <div class="actions">
      <button class="btn s" id="mExport">⬇ Backup (.json)</button>
      <button class="btn s" id="mImport">⬆ Restore (.json)</button>
      <button class="btn s" id="mExportCsv">⬇ Export CSV</button>
      <button class="btn s" id="mImportCsv">⬆ Import CSV</button>
-     <button class="btn s" id="mSync">🔗 Sync across devices${syncCode()?' · on':''}</button>
-   </div>
-   <div class="actions" style="margin-top:8px">
      <button class="btn s" id="mSnaps">⟲ Restore a previous version</button>
+   </div>
+   <p style="font-size:12px;color:var(--mut);margin:14px 0 4px;font-weight:700">SYNC</p>
+   <div class="actions">
+     <button class="btn s" id="mSync">🔗 Sync across devices${syncCode()?' · on':''}</button>
    </div>
    <p id="photoMeter" style="font-size:11.5px;color:var(--mut);margin:8px 0 0">Photos are saved on this device and aren't in the .json backup.</p>
    <div class="actions" style="margin-top:14px">
@@ -1517,7 +1532,7 @@ function showSnapshots(){
 }
 function exportMarks(){
   const _m=runtimeToStore(MARKS);
-  const data={app:'BarrySandersCollectorsHub',ver:'V223',fmt:'id2',schema:2,exported:new Date().toISOString(),count:{o:_ownedCount(MARKS),w:_wantCount(MARKS)},sum:_sum(_m),marks:_m,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
+  const data={app:'BarrySandersCollectorsHub',ver:'V224',fmt:'id2',schema:2,exported:new Date().toISOString(),count:{o:_ownedCount(MARKS),w:_wantCount(MARKS)},sum:_sum(_m),marks:_m,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fileBase('collection')+'-'+new Date().toISOString().slice(0,10)+'.json'; a.click();
   try{ localStorage.setItem('bs_hub_lastbackup', String(ownedCount())); }catch(e){}
