@@ -265,8 +265,36 @@ const CUSTOM_BASE = CARDS.length;
 const DEAD = 'BSHUB_DEAD_SLOT';
 const DEAD_ROW = [0, DEAD, null, '', '', 0, null, 0, ''];
 let CUSTOM = [];
-try { CUSTOM = JSON.parse(localStorage.getItem('bs_hub_custom') || '[]') || []; } catch(e){ CUSTOM = []; }
+try { const _c = JSON.parse(localStorage.getItem('bs_hub_custom') || '[]'); CUSTOM = Array.isArray(_c) ? _c.map(_cleanRow) : []; } catch(e){ CUSTOM = []; }
 CUSTOM.forEach(row => CARDS.push(Array.isArray(row) ? row : DEAD_ROW.slice()));
+/* Everything that arrives from outside this device (a sync, an imported file, a stored copy) is untrusted:
+   it is cleaned to exactly the shapes the app writes itself, so a malformed or hostile blob can neither
+   crash a screen nor inject markup. */
+function _cleanRow(r){ if(!Array.isArray(r)) return null;
+  const s=(v,n)=>String(v==null?'':v).slice(0,n);
+  const y=Math.trunc(+r[0]), pr=Math.trunc(+r[6]);
+  return [ (y>=1900&&y<=2100)?y:0, s(r[1],200), (r[2]==null||r[2]==='')?null:s(r[2],40), s(r[3],2000), s(r[4],40), r[5]?1:0, (pr>0&&pr<1e9)?pr:null, r[7]?1:0, s(r[8],200) ]; }
+function _cleanMark(v){ if(!v||typeof v!=='object'||Array.isArray(v)) return null; const o={};
+  const num=(x,max)=>{ const n=+x; return (isFinite(n)&&n>0&&n<=max)?n:0; };
+  if(v.o===true||v.o===1) o.o=true;
+  const w=Math.trunc(+v.w); if(w>=1&&w<=3) o.w=w;
+  const q=num(v.q,1e6); if(q) o.q=q;
+  const pd=num(v.paid,1e9); if(pd) o.paid=pd;
+  const vl=num(v.val,1e9); if(vl) o.val=vl;
+  if(typeof v.g==='string'&&v.g) o.g=v.g.slice(0,40);
+  if(typeof v.j==='string'&&v.j) o.j=v.j.slice(0,20000);
+  if(typeof v.img==='string'&&/^https?:\/\//i.test(v.img)) o.img=v.img.slice(0,2000);
+  const a=+v.a; if(isFinite(a)&&a>0) o.a=a;
+  return Object.keys(o).length?o:null; }
+/* additive merge of one card's mark: existing values win, the incoming mark fills gaps, owned is a union,
+   want takes the higher priority, "added" keeps the earliest date. */
+function _mergeOne(cur, inc){ cur=cur||{}; inc=inc||{};
+  const out=Object.assign({}, inc, cur);
+  if(inc.o||cur.o) out.o=true;
+  if(inc.w||cur.w) out.w=Math.max(inc.w||0, cur.w||0);
+  const a1=cur.a||0, a2=inc.a||0, aa=(a1&&a2)?Math.min(a1,a2):(a1||a2); if(out.o&&aa) out.a=aa; else delete out.a;
+  ['o','w','g','q','j'].forEach(k=>{ if(out[k]===''||out[k]===0||out[k]===false||out[k]==null) delete out[k]; });
+  return out; }
 function isCustom(i){ return i >= CUSTOM_BASE; }
 function isDead(i){ return isCustom(i) && (!CARDS[i] || CARDS[i][S] === DEAD); }
 /* ---------- stable-ID marks (so the catalog can change without breaking saved collections) ----------
@@ -279,26 +307,39 @@ const _MFILL=new Set(['and','the','of','a','w','with','edition','card','cards','
 function _mnorm(s){ s=String(s).toLowerCase().replace(/&/g,' and ').replace(/[^a-z0-9 ]/g,' '); return s.split(/\s+/).filter(t=>t&&!_MFILL.has(t)).sort().join(''); }
 function _mnumn(n){ n=String(n==null?'':n).toLowerCase(); if(n==='nno'||n==='none'||n==='') return ''; return n.replace(/[^a-z0-9]/g,''); }
 function cid(i){ if(i>=CUSTOM_BASE) return 'c|'+(i-CUSTOM_BASE); const c=CARDS[i]; if(!c) return 'x|'+i; return 'b|'+c[ID]; }
-function _idIndex(){ const map={}; for(let i=0;i<CARDS.length;i++){ if(CARDS[i]) map[cid(i)]=i; } return map; }
+function _idIndex(){ const map=Object.create(null); for(let i=0;i<CARDS.length;i++){ if(CARDS[i]) map[cid(i)]=i; } return map; }
 /* legacy identity (year|set|number) -> index, base-preferring (lowest index wins; restored variants
    were appended at the end, so the lowest index is always the row a legacy mark referred to). */
 function _legIndex(){ const m={}; for(let i=0;i<CUSTOM_BASE;i++){ const c=CARDS[i]; if(!c) continue; const key='b|'+c[Y]+'|'+_mnorm(c[S])+'|'+_mnumn(c[N]); if(!(key in m)) m[key]=i; } return m; }
 /* stored (stable-ID keyed, or legacy identity/integer keyed) -> runtime {index:mark} */
-function storeToRuntime(stored){ const out={}; if(!stored||typeof stored!=='object') return out;
+/* Marks whose card ID this build doesn't know yet (e.g. a card added in a newer release, seen here via a
+   sync or backup) are kept aside verbatim and written back out with everything else, so an older build can
+   never silently destroy them. They re-attach by themselves the moment a build that knows the card loads. */
+var ORPHANS={}, _orphN=0, _orphBytes=0;
+function _orphanPut(k,v){
+  if(!ORPHANS[k]){ const sz=JSON.stringify(v).length; if(_orphN>=2000 || _orphBytes+sz>600000) return;   // bounded: a bad feed can't bloat storage
+    _orphN++; _orphBytes+=sz; ORPHANS[k]=v; }
+  else ORPHANS[k]=_mergeOne(ORPHANS[k],v); }
+function _orphansReset(){ for(const k in ORPHANS) delete ORPHANS[k]; _orphN=0; _orphBytes=0; }
+function storeToRuntime(stored, keep){ const out={}; if(!stored||typeof stored!=='object') return out;
   const idx=_idIndex(); let leg=null;
-  for(const k in stored){ const v=stored[k]; if(v==null) continue;
-    if(k[0]==='c'){ const i=idx[k]; if(i!=null) out[i]=v; }                              // custom card
+  const put=(i,v)=>{ out[i]=out[i]?_mergeOne(out[i],v):v; };
+  for(const k in stored){ if(!Object.prototype.hasOwnProperty.call(stored,k)) continue;
+    if(!/^(b\|[^|]+(\|[^|]*\|[^|]*)?|c\|\d+|\d+)$/.test(k)) continue;      // only the key shapes the app ever writes
+    const v=_cleanMark(stored[k]); if(!v) continue;
+    if(k[0]==='c'){ const i=idx[k]; if(i!=null) put(i,v); else if(keep&&/^c\|\d+$/.test(k)) _orphanPut(k,v); }   // custom card
     else if(k[0]==='b'){ const p=k.split('|'); let i=null;
       if(p.length===2){ i=idx[k]; }                                                      // stable ID (current)
       else if(p.length===4){ leg=leg||_legIndex(); i=leg[k]; }                           // legacy identity -> migrate
-      if(i==null && MARK_ALIAS[k]!=null) i=idx['b|'+MARK_ALIAS[k]];                       // de-duplicated row -> surviving twin
-      if(i!=null) out[i]=v;
+      if(i==null && Object.prototype.hasOwnProperty.call(MARK_ALIAS,k)) i=idx['b|'+MARK_ALIAS[k]];                       // de-duplicated row -> surviving twin
+      if(i!=null) put(i,v);
+      else if(keep && p.length===2 && /^b\|\d+$/.test(k) && !Object.prototype.hasOwnProperty.call(MARK_ALIAS,k)) _orphanPut(k,v);   // unknown to this build -> preserve
     }
-    else { const i=+k; if(Number.isInteger(i)&&i>=0&&i<CARDS.length&&CARDS[i]) out[i]=v; } // ancient index key
+    else { const i=+k; if(Number.isInteger(i)&&i>=0&&i<CARDS.length&&CARDS[i]) put(i,v); } // ancient index key
   }
   return out; }
 /* runtime {index:mark} -> stored stable-ID keyed */
-function runtimeToStore(marks){ const out={}; for(const k in marks){ const i=+k; if(i>=0&&i<CARDS.length&&CARDS[i]) out[cid(i)]=marks[k]; } return out; }
+function runtimeToStore(marks){ const out={}; for(const k in marks){ const i=+k; if(i>=0&&i<CARDS.length&&CARDS[i]) out[cid(i)]=marks[k]; } for(const k in ORPHANS){ if(!(k in out)) out[k]=ORPHANS[k]; } return out; }
 
 /* ============================================================================
    BACKUP ROBUSTNESS — anti-wipe guard, rolling snapshots, integrity, self-heal.
@@ -317,28 +358,35 @@ function _sum(sm){ let h=2166136261>>>0; const ks=Object.keys(sm||{}).sort();
 /* ---- known-good anchor (localStorage): last healthy state, for instant rollback ---- */
 function _writeGood(){ try{ localStorage.setItem(_GOODK(), JSON.stringify({t:Date.now(), o:_ownedCount(MARKS), m:runtimeToStore(MARKS)})); }catch(e){} }
 function _readGood(){ try{ return JSON.parse(localStorage.getItem(_GOODK())||'null'); }catch(e){ return null; } }
-function restoreLastGood(){ const g=_readGood(); if(g&&g.m){ _guardBypass=true; MARKS=storeToRuntime(g.m);
-  try{ localStorage.setItem(LSKEY, JSON.stringify(runtimeToStore(MARKS))); }catch(e){} idbSave(); if(typeof render==='function') render(); toast('Kept your '+g.o+' owned ✔'); } }
+function restoreLastGood(){ const g=_readGood(); if(g&&g.m){ _guardBypass=true; _orphansReset(); MARKS=storeToRuntime(g.m,true);
+  try{ const s=JSON.stringify(runtimeToStore(MARKS)); localStorage.setItem(LSKEY, s); _lastRaw=s; }catch(e){} idbSave(); if(typeof render==='function') render(); toast('Kept your '+g.o+' owned ✔'); } }
 /* ---- rolling snapshot history (IndexedDB): last ~20 + one-per-day for a month ---- */
 async function _snapRead(){ const a=await idbGet(_SNAPK()); return Array.isArray(a)?a:[]; }
-async function _snapWrite(arr){ try{ const db=_idb||(_idb=await openIDB()); if(!db)return; db.transaction('kv','readwrite').objectStore('kv').put(JSON.stringify(arr), _SNAPK()); }catch(e){} }
+async function _snapWrite(arr){ try{ const db=_idb||(_idb=await openIDB()); if(!db)return;
+  await new Promise(r=>{ const tx=db.transaction('kv','readwrite'); tx.objectStore('kv').put(JSON.stringify(arr), _SNAPK()); tx.oncomplete=()=>r(); tx.onerror=()=>r(); tx.onabort=()=>r(); }); }catch(e){} }
 function _snapPrune(snaps){ snaps.sort((a,b)=>a.t-b.t); const now=Date.now(), DAY=86400000;
-  const recent=new Set(snaps.slice(-20)); const seenDay={}; const keep=[];
-  for(const s of snaps){ if(recent.has(s)){ keep.push(s); continue; }
+  const recent=new Set(snaps.slice(-20));
+  const safety=new Set(snaps.filter(s=>s.r&&s.r!=='auto').slice(-10));     // "before-import/reset/restore/sync…" are never crowded out by routine autosaves
+  const seenDay={}; const keep=[];
+  for(const s of snaps){ if(recent.has(s)||safety.has(s)){ keep.push(s); continue; }
     const day=Math.floor(s.t/DAY); if((now-s.t)<=31*DAY && !seenDay[day]){ seenDay[day]=1; keep.push(s); } }
   return keep.slice(-60); }
-function snapshotPush(reason){ (async()=>{ try{ const snaps=await _snapRead();
-  snaps.push({t:Date.now(), r:reason||'', o:_ownedCount(MARKS), w:_wantCount(MARKS), m:runtimeToStore(MARKS)});
-  await _snapWrite(_snapPrune(snaps)); }catch(e){} })(); }
-function snapshotMaybe(){ clearTimeout(_snapT); _snapT=setTimeout(()=>{ (async()=>{ try{ const snaps=await _snapRead();
-  const o=_ownedCount(MARKS), w=_wantCount(MARKS); const last=snaps[snaps.length-1];
-  if(last && last.o===o && last.w===w) return;                       // nothing meaningful changed
-  snaps.push({t:Date.now(), r:'auto', o, w, m:runtimeToStore(MARKS)});
-  await _snapWrite(_snapPrune(snaps)); }catch(e){} })(); }, 2500); }
+/* The snapshot is captured the instant this is called — callers invoke it just BEFORE they change MARKS,
+   and the async storage work that follows must not see the post-change state. All writes go through one
+   queue so two overlapping snapshots can't overwrite each other. */
+let _snapQ=Promise.resolve();
+function _snapEntry(reason){ const m=runtimeToStore(MARKS); return {t:Date.now(), r:reason||'', o:_ownedCount(MARKS), w:_wantCount(MARKS), s:_sum(m), m}; }
+function _snapEnqueue(e, skipIfSame){ _snapQ=_snapQ.then(async()=>{ const snaps=await _snapRead();
+  const last=snaps.slice().sort((a,b)=>a.t-b.t).pop();
+  if(skipIfSame && last && (last.s?last.s===e.s:(last.o===e.o&&last.w===e.w))) return;
+  while(snaps.some(x=>x.t===e.t)) e.t++;
+  snaps.push(e); await _snapWrite(_snapPrune(snaps)); }).catch(()=>{}); return _snapQ; }
+function snapshotPush(reason){ return _snapEnqueue(_snapEntry(reason), false); }
+function snapshotMaybe(){ clearTimeout(_snapT); _snapT=setTimeout(()=>{ _snapEnqueue(_snapEntry('auto'), true); }, 2500); }
 async function snapshotList(){ const a=await _snapRead(); return a.slice().sort((x,y)=>y.t-x.t); }
 function snapshotRestore(t){ (async()=>{ try{ const a=await _snapRead(); const s=a.find(x=>x.t===t);
   if(!s){ toast('Snapshot not found'); return; }
-  snapshotPush('before-restore'); _guardBypass=true; MARKS=storeToRuntime(s.m); saveMarks(); if(typeof render==='function') render();
+  snapshotPush('before-restore'); _guardBypass=true; _orphansReset(); MARKS=storeToRuntime(s.m,true); saveMarks(); if(typeof render==='function') render();
   toast('Restored '+s.o+' owned from '+new Date(t).toLocaleString()); }catch(e){ toast('Could not restore'); } })(); }
 function saveCustom(){ try{ localStorage.setItem('bs_hub_custom', JSON.stringify(CUSTOM)); }catch(e){} if(typeof idbSave==='function') idbSave(); }
 const SPECIAL = { police:{y:1989,s:'1989 Detroit Lions Police',n:'11'}, tt:{y:1989,s:'1989 Topps Traded Football',n:'83T'},
@@ -360,23 +408,44 @@ const ERAS=[
 ];
 function eraOf(y){ return ERAS.find(e=>y>=e.lo&&y<=e.hi) || ERAS[ERAS.length-1]; }
 
-const APP_VER='V226';
+const APP_VER='V227';
 /* ---------- STATE (localStorage) ---------- */
 const LSKEY='bs_hub_marks_v1';
 const PRELOAD_MARKS = /*__PRELOAD__*/{}/*__ENDP__*/;
 const PRELOAD_SIG='bf21a9e8fbc5';
 const PSIG_KEY=LSKEY+'_psig', PDIS_KEY=LSKEY+'_pdis';
-let MARKS=null, _hadSaved=false, _pendingUpd=false;
+let MARKS=null, _hadSaved=false, _pendingUpd=false, _bootGood=null, _lastRaw=null, _genN=0, _bootGen=0;
 const PRELOAD_RT = storeToRuntime(PRELOAD_MARKS);   // master preload as runtime {index:mark}
-try{ const raw=localStorage.getItem(LSKEY); if(raw){ MARKS=storeToRuntime(JSON.parse(raw)); _hadSaved=true; } }catch(e){ MARKS=null; }
-if(!MARKS){ MARKS=Object.assign({}, PRELOAD_RT); if(Object.keys(MARKS).length){ saveMarks(); try{ localStorage.setItem(PSIG_KEY, PRELOAD_SIG); }catch(e){} } }
+try{ _bootGood=_readGood(); }catch(e){ _bootGood=null; }
+try{ _bootGen=_genN=+localStorage.getItem(LSKEY+'_gen')||0; }catch(e){}   // captured before the first save can overwrite it
+try{ const raw=localStorage.getItem(LSKEY); if(raw){ MARKS=storeToRuntime(JSON.parse(raw),true); _hadSaved=true; _lastRaw=raw; } }
+catch(e){ MARKS=null; try{ const bad=localStorage.getItem(LSKEY); if(bad) localStorage.setItem(LSKEY+'_corrupt', bad); }catch(x){} }   // unreadable copy is kept aside, never silently overwritten
+if(!MARKS){ MARKS={}; Object.keys(PRELOAD_RT).forEach(k=>{ MARKS[k]=Object.assign({}, PRELOAD_RT[k]); }); if(Object.keys(MARKS).length){ saveMarks(); try{ localStorage.setItem(PSIG_KEY, PRELOAD_SIG); }catch(e){} } }
 else{
   saveMarks();   // re-persist in identity format (harmless no-op if already migrated; one-time migration off legacy index keys)
   if(_hadSaved && Object.keys(PRELOAD_RT).length){
     try{ if(localStorage.getItem(PSIG_KEY)!==PRELOAD_SIG && localStorage.getItem(PDIS_KEY)!==PRELOAD_SIG) _pendingUpd=true; }catch(e){}
   }
 }
+/* Another tab / the installed app / a stale background page may have saved since we last looked. Before
+   writing, fold their changes in (3-way: what we last saw vs what's stored now vs what we hold), so a
+   stale view can never overwrite newer marks. Returns true if anything was merged. */
+function _ser(v){ return JSON.stringify(_cleanMark(v)||null); }
+function _reconcileExternal(){
+  let raw; try{ raw=localStorage.getItem(LSKEY); }catch(e){ return false; }
+  if(raw==null || raw===_lastRaw) return false;
+  let ext, base; try{ ext=JSON.parse(raw); base=_lastRaw?JSON.parse(_lastRaw):{}; }catch(e){ return false; }
+  if(!ext||typeof ext!=='object'||!base||typeof base!=='object') return false;
+  const mine=runtimeToStore(MARKS), out=Object.assign({}, mine); let changed=false;
+  const keys=new Set([...Object.keys(ext), ...Object.keys(base)]);
+  keys.forEach(k=>{ const e=_ser(ext[k]), b=_ser(base[k]);
+    if(e!==b && _ser(mine[k])===b){ const c=_cleanMark(ext[k]); if(c) out[k]=c; else delete out[k]; changed=true; } });
+  _lastRaw=raw;
+  if(changed){ _orphansReset(); MARKS=storeToRuntime(out,true); }
+  return changed;
+}
 function saveMarks(){
+  _reconcileExternal();
   const n=_ownedCount(MARKS);
   /* anti-wipe guard: block a silent mass-loss unless it was an explicit action (_guardBypass) */
   if(!_guardBypass && _lastGoodCount>=10 && (n===0 || n < Math.floor(_lastGoodCount*0.6))){
@@ -385,7 +454,8 @@ function saveMarks(){
     if(!ok){ restoreLastGood(); return; }
   }
   _guardBypass=false;
-  try{ localStorage.setItem(LSKEY, JSON.stringify(runtimeToStore(MARKS))); }catch(e){ toast('⚠ Could not save (storage full/blocked)'); }
+  _genN++;
+  try{ const s=JSON.stringify(runtimeToStore(MARKS)); localStorage.setItem(LSKEY, s); _lastRaw=s; localStorage.setItem(LSKEY+'_gen', String(_genN)); }catch(e){ toast('⚠ Could not save (storage full/blocked)'); }
   _lastGoodCount=n; _writeGood();
   idbSave();
   snapshotMaybe();
@@ -396,7 +466,7 @@ function openIDB(){ return new Promise(res=>{ try{ const r=indexedDB.open('bshub
   r.onupgradeneeded=()=>{ const db=r.result; if(!db.objectStoreNames.contains('kv')) db.createObjectStore('kv'); if(!db.objectStoreNames.contains('photos')) db.createObjectStore('photos'); };
   r.onsuccess=()=>res(r.result); r.onerror=()=>res(null); }catch(e){ res(null); } }); }
 var _idbT=null;
-function idbSave(){ clearTimeout(_idbT); _idbT=setTimeout(async()=>{ try{ const db=_idb||(_idb=await openIDB()); if(!db)return; const os=db.transaction('kv','readwrite').objectStore('kv'); os.put(JSON.stringify(runtimeToStore(MARKS)), LSKEY); os.put(JSON.stringify(CUSTOM), LSKEY+'_custom'); }catch(e){} }, 500); }
+function idbSave(){ clearTimeout(_idbT); _idbT=setTimeout(async()=>{ try{ const db=_idb||(_idb=await openIDB()); if(!db)return; const os=db.transaction('kv','readwrite').objectStore('kv'); os.put(JSON.stringify(runtimeToStore(MARKS)), LSKEY); os.put(JSON.stringify(CUSTOM), LSKEY+'_custom'); os.put(JSON.stringify(_genN), LSKEY+'_gen'); }catch(e){} }, 500); }
 function idbGet(key){ return (async()=>{ try{ const db=_idb||(_idb=await openIDB()); if(!db)return null; return await new Promise(r=>{ const g=db.transaction('kv').objectStore('kv').get(key); g.onsuccess=()=>{ try{ r(g.result?JSON.parse(g.result):null); }catch(e){ r(null); } }; g.onerror=()=>r(null); }); }catch(e){ return null; } })(); }
 async function idbLoad(){ return idbGet(LSKEY); }
 async function idbLoadCustom(){ return idbGet(LSKEY+'_custom'); }
@@ -423,29 +493,51 @@ function genSyncCode(){
 async function syncPull(){
   const r=await fetch(SYNC_API+'/sync/'+encodeURIComponent(syncCode()));
   if(!r.ok) throw new Error('pull failed: '+r.status);
-  return r.json();
+  const s=await r.json();
+  if(!s||typeof s!=='object') throw new Error('bad sync reply');
+  return s;
 }
 async function syncPush(baseRev){
+  const body=JSON.stringify({ baseRev, marks: runtimeToStore(MARKS), custom: CUSTOM });
   const r=await fetch(SYNC_API+'/sync/'+encodeURIComponent(syncCode()), {
-    method:'PUT', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ baseRev, marks: runtimeToStore(MARKS), custom: CUSTOM }),
-    keepalive:true
+    method:'PUT', headers:{'Content-Type':'application/json'}, body,
+    keepalive: body.length<60000          // browsers reject keepalive requests over ~64 KB — never let that block a big collection
   });
   if(r.status===409){ return { conflict:true, current:(await r.json()).current }; }
   if(!r.ok) throw new Error('push failed: '+r.status);
   return r.json();
 }
+/* Fold another collection's custom cards into ours by IDENTITY, not position (custom slot numbers differ
+   between devices), and re-key the incoming marks to OUR slots. Returns the re-keyed marks. */
+function _customSig(r){ return JSON.stringify(r); }
+function _adoptCustom(rows, marksStore, fileBase){
+  const map={}, sigIdx={}; let added=0;
+  CUSTOM.forEach((r,pos)=>{ if(Array.isArray(r)){ const s=_customSig(r); if(!(s in sigIdx)) sigIdx[s]=pos; } });
+  (Array.isArray(rows)?rows:[]).forEach((raw,j)=>{ const row=_cleanRow(raw); if(!row) return; const s=_customSig(row);
+    let pos=sigIdx[s]; if(pos==null){ CUSTOM.push(row); CARDS.push(row); pos=CUSTOM.length-1; sigIdx[s]=pos; added++; }
+    map['c|'+j]='c|'+pos; });
+  const out={}; for(const k in (marksStore||{})){
+    if(k[0]==='c'){ if(map[k]) out[map[k]]=marksStore[k]; }
+    else if(/^\d+$/.test(k) && +k>=CUSTOM_BASE-0 && fileBase==null){ /* ancient index key that points into the custom area: can't be attributed safely */ }
+    else if(/^\d+$/.test(k) && fileBase!=null && +k>=fileBase){ const t=map['c|'+(+k-fileBase)]; if(t) out[t]=marksStore[k]; }
+    else out[k]=marksStore[k]; }
+  return {marks:out, added};
+}
+/* canonical content of a stored state, independent of custom-slot numbering — used to decide whether
+   two devices actually differ (so identical collections never ping-pong pushes) */
+function _semantic(store, rows){ const sig={}; (Array.isArray(rows)?rows:[]).forEach((r,j)=>{ const c=_cleanRow(r); if(c) sig['c|'+j]='c#'+_customSig(c); });
+  const out={}; for(const k in (store||{})){ const v=_cleanMark(store[k]); if(!v) continue; if(k[0]==='c'){ if(sig[k]) out[sig[k]]=v; } else out[k]=v; } return out; }
+function _semSum(store, rows){ return _sum(_semantic(store, rows)); }
+/* additive merge of a server state into this device. Returns true if anything changed locally. */
 function _syncAdopt(state){
-  snapshotPush('before-sync');
-  mergeMarks(storeToRuntime(state.marks||{}));               // additive: never drops a local-only mark
-  (Array.isArray(state.custom)?state.custom:[]).forEach(row=>{
-    if(!Array.isArray(row)) return;
-    const sig=JSON.stringify(row);
-    if(!CUSTOM.some(r=>JSON.stringify(r)===sig)){ CUSTOM.push(row); CARDS.push(row); }
-  });
-  saveCustom();
-  setSyncRev(state.rev);
-  if(typeof render==='function') render();
+  const smarks=(state&&typeof state.marks==='object'&&state.marks&&!Array.isArray(state.marks)&&Object.keys(state.marks).length<=200000)?state.marks:{};
+  const before=_snapEntry('before-sync'), customBefore=CUSTOM.length;
+  const ad=_adoptCustom(state&&state.custom, smarks);
+  if(ad.added) saveCustom();
+  mergeMarks(storeToRuntime(ad.marks,true));               // additive: never drops a local-only mark
+  const changed = ad.added>0 || _sum(runtimeToStore(MARKS))!==before.s;
+  if(changed){ _snapEnqueue(before,false); if(typeof render==='function') render(); }
+  return changed;
 }
 let _syncBusy=false;
 function markSynced(){ try{ localStorage.setItem('bs_sync_lastat', String(Date.now())); }catch(e){} }
@@ -455,30 +547,38 @@ async function syncNow(silent){
   if(!code){ if(!silent) toast('Set up sync first (⋯ ▸ Sync across devices)'); return; }
   if(_syncBusy) return; _syncBusy=true;
   try{
-    const server=await syncPull();
-    if(server.rev>syncRev()) _syncAdopt(server);
-    const mySum=_sum(runtimeToStore(MARKS));
-    const lastSum=localStorage.getItem('bs_sync_lastsum')||'';
-    if(mySum===lastSum && server.rev<=syncRev()){ markSynced(); if(!silent) toast('Already up to date'); return; }
-    const res=await syncPush(syncRev());
-    if(res && res.conflict){ _syncAdopt(res.current); markSynced(); if(!silent) toast('Synced — merged in a change from another device'); return; }
-    setSyncRev(res.rev);
-    try{ localStorage.setItem('bs_sync_lastsum', mySum); }catch(e){}
-    markSynced();
-    if(!silent) toast('Synced ✔');
+    let server=await syncPull();
+    for(let attempt=0; attempt<3; attempt++){
+      const changed=_syncAdopt(server);                      // pull in anything the server has that we don't
+      const mine=_semSum(runtimeToStore(MARKS), CUSTOM), theirs=_semSum(server.marks, server.custom);
+      if(mine===theirs){ setSyncRev(server.rev||0); markSynced(); if(!silent) toast(changed?'Synced — merged in changes from another device':'Already up to date'); return; }
+      const res=await syncPush(server.rev||0);               // base = exactly what we just merged
+      if(res && res.conflict){ server=res.current; continue; }  // someone pushed in between: merge theirs and try again
+      setSyncRev(res.rev);
+      markSynced();
+      if(!silent) toast(changed?'Synced — merged in changes from another device':'Synced ✔');
+      return;
+    }
+    if(!silent) toast('Sync is busy — try again in a moment');
   }catch(e){ if(!silent) toast('Sync failed — check your connection'); }
   finally{ _syncBusy=false; }
 }
-function setupSync(existingCode){
-  const code=(existingCode||genSyncCode()).toUpperCase();
+async function setupSync(existingCode){
+  const code=(existingCode||genSyncCode()).toUpperCase().replace(/\s+/g,'');
+  if(!/^[A-Z0-9-]{6,40}$/.test(code)){ toast('That code doesn’t look right — letters, numbers and dashes only'); return; }
   try{ localStorage.setItem('bs_sync_code', code); }catch(e){}
   setSyncRev(0);
   try{ localStorage.removeItem('bs_sync_lastsum'); }catch(e){}
+  if(existingCode){      // joining: make sure the code actually matches a collection before pushing anything under it
+    try{ const s=await syncPull();
+      if(!(s.rev>0) && !confirm('No synced collection was found for code '+code+'.\n\nCheck it was typed exactly as shown on your other device.\n\nStart a NEW synced collection under this code anyway?')){ stopSync(true); return; }
+    }catch(e){ stopSync(true); toast('Couldn’t reach the sync server — check your connection and try again'); return; }
+  }
   syncNow(false);
 }
-function stopSync(){
+function stopSync(quiet){
   try{ localStorage.removeItem('bs_sync_code'); localStorage.removeItem('bs_sync_rev'); localStorage.removeItem('bs_sync_lastsum'); }catch(e){}
-  toast('Sync turned off on this device');
+  if(!quiet) toast('Sync turned off on this device');
 }
 function syncModal(){
   const code=syncCode();
@@ -515,7 +615,7 @@ function syncModal(){
   </div>`);
   $('#syncGo').onclick=()=>{ closeModal(); syncNow(false); };
   $('#syncCopy').onclick=()=>{ try{ navigator.clipboard.writeText(code); toast('Code copied'); }catch(e){ toast(code); } };
-  $('#syncOff').onclick=()=>{ if(confirm('Turn off sync on this device? Your marks stay as they are — this just stops linking with the code.')){ stopSync(); closeModal(); } };
+  $('#syncOff').onclick=()=>{ if(confirm('Turn off sync on this device? Your marks stay as they are — this just stops linking with the code.')){ stopSync(false); closeModal(); } };
 }
 
 /* ============================================================================
@@ -579,13 +679,16 @@ function setMark(id, patch){
   if(Object.keys(cur).length) MARKS[id]=cur; else delete MARKS[id];
   saveMarks();
 }
-/* set owned + manage an "added" timestamp (drives Recently Added / newest sort) */
-function markOwned(id, val, extra){
+/* set owned + manage an "added" timestamp (drives Recently Added / newest sort). The in-memory step is split
+   out so bulk operations can change many cards and then save ONCE (one guard check, one undo). */
+function _markOwnedMem(id, val, extra){
   // marking owned clears any want-list flag so an owned card never lingers on the want list
-  setMark(id, Object.assign({o:val}, val?{w:0}:{}, extra||{}));
-  if(val){ if(MARKS[id] && !MARKS[id].a){ MARKS[id].a = Date.now(); saveMarks(); } }
-  else if(MARKS[id] && MARKS[id].a){ delete MARKS[id].a; saveMarks(); }
+  const cur = Object.assign({}, MARKS[id]||{}, {o:val}, val?{w:0}:{}, extra||{});
+  ['o','w','g','q','j','img','paid','val'].forEach(k=>{ if(cur[k]===''||cur[k]===0||cur[k]===false||cur[k]==null) delete cur[k]; });
+  if(val){ if(!cur.a) cur.a=Date.now(); } else delete cur.a;
+  if(Object.keys(cur).length) MARKS[id]=cur; else delete MARKS[id];     // never leave an empty {} behind
 }
+function markOwned(id, val, extra){ _markOwnedMem(id,val,extra); saveMarks(); }
 const addedAt=id=>m(id).a||0;
 function fmtDate(ts){ try{ return new Date(ts).toLocaleDateString(undefined,{month:'short',day:'numeric',year:(new Date(ts).getFullYear()!==new Date().getFullYear()?'numeric':undefined)}); }catch(e){ return ''; } }
 function timeAgo(ts){ if(!ts) return ''; const s=Math.floor((Date.now()-ts)/1000); if(s<60) return 'just now'; const m=Math.floor(s/60); if(m<60) return m+'m ago'; const h=Math.floor(m/60); if(h<24) return h+'h ago'; const d=Math.floor(h/24); if(d<7) return d+'d ago'; return fmtDate(ts); }
@@ -644,9 +747,10 @@ let CUR={view:'dashboard',year:null,setName:null};
 let dashEraOpen={}, dashTypesExpanded=false;
 function toggleEraYears(name){ dashEraOpen[name] = !dashEraOpen[name]; render(); }
 function toggleDashTypes(){ dashTypesExpanded=!dashTypesExpanded; render(); }
+function _applyHash(){ const h=location.hash.replace('#','').split('/'); if(h[0]){ CUR.view=h[0]; const y=+h[1]; if(h[1]&&y>=1980&&y<=2100) CUR.year=Math.trunc(y); } }
 function go(view,arg){ CUR.view=view; if(view==='collection') collMode='all'; if(view==='years'&&arg)CUR.year=arg; if(view==='set'&&arg){CUR.setName=arg; setOwnFilter='';} location.hash=view+(view==='years'&&CUR.year?('/'+CUR.year):''); render(); }
 window.go=go;
-window.addEventListener('hashchange',()=>{ const h=location.hash.replace('#','').split('/'); if(h[0]){CUR.view=h[0]; if(h[1])CUR.year=+h[1];} render(); });
+window.addEventListener('hashchange',()=>{ _applyHash(); render(); });
 /* remember where you were + your filters/sort across reloads */
 function saveState(){ try{ localStorage.setItem('bs_hub_state', JSON.stringify({v:CUR.view,y:CUR.year,s:CUR.setName,yf:yFilter,sf:sFilter,so:setOwnFilter,gf:grailOwnFilter})); }catch(e){} }
 function restoreState(){ try{ const raw=localStorage.getItem('bs_hub_state'); if(!raw)return; const st=JSON.parse(raw);
@@ -663,7 +767,9 @@ function render(){
   if(CUR.view==='set' && !CUR.setName) CUR.view='sets';
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===CUR.view||(CUR.view==='set'&&b.dataset.v==='sets')));
   const el=document.getElementById('main'); el.scrollTop=0;
-  const fn={dashboard:vDash,years:vYear,search:vSearch,collection:vCollection,recent:vRecent,wants:vWants,trades:vTradesAlias,grails:vGrails,sets:vSets,set:vSet,goals:vGoals,portfolio:vPortfolio,guide:vGuide}[CUR.view]||vDash;
+  const VIEWS={dashboard:vDash,years:vYear,search:vSearch,collection:vCollection,recent:vRecent,wants:vWants,trades:vTradesAlias,grails:vGrails,sets:vSets,set:vSet,goals:vGoals,portfolio:vPortfolio,guide:vGuide};
+  if(!Object.prototype.hasOwnProperty.call(VIEWS,CUR.view)) CUR.view='dashboard';   // unknown / hostile #hash can't break the screen
+  const fn=VIEWS[CUR.view];
   el.innerHTML=fn();
   wire();
   updateNav();
@@ -673,10 +779,10 @@ function render(){
 }
 
 /* ---------- card item component ---------- */
-function badge(t){ const c=TYPE_COLORS[t]||['#eee','#333']; return `<span class="badge" style="background:${c[0]};color:${c[1]}">${t||'—'}</span>`; }
+function badge(t){ const c=TYPE_COLORS[t]||['#eee','#333']; return `<span class="badge" style="background:${c[0]};color:${c[1]}">${esc(t)||'—'}</span>`; }
 function itemHTML(id){
   const c=CARDS[id]; const mk=m(id); const o=!!mk.o; const w=mk.w||0;
-  const pr=c[PR]?`<span class="pr">/${c[PR]}</span>`:'';
+  const pr=c[PR]?`<span class="pr">/${esc(c[PR])}</span>`:'';
   const gr=c[GR]?`<span class="grail" title="Grail">💎</span>`:'';
   const rk=c[RK]?`<span class="badge" style="background:#fff3d6;color:#8a6d00">RC</span>`:'';
   const ad=(o&&mk.a)?`<span class="num addchip" title="Added to your collection">🕒 ${fmtDate(mk.a)}</span>`:'';
@@ -688,16 +794,16 @@ function itemHTML(id){
   return `<div class="item ${o?'owned':''}" data-id="${id}">
     ${thumb?`<div class="it-thumb">${thumb}</div>`:''}
     <div class="it-main">
-      <div class="it-set"><span class="yr">${c[Y]}</span> ${esc(c[S])}${c[N]?` <span class="num">#${esc(c[N])}</span>`:''}</div>
+      <div class="it-set"><span class="yr">${esc(c[Y])}</span> ${esc(c[S])}${c[N]?` <span class="num">#${esc(c[N])}</span>`:''}</div>
       <div class="it-desc">${esc(c[D])}</div>
       <div class="it-meta">${badge(c[T])}${rk}${pr}${gr}${custBadge}${ad}</div>
       <details class="xp"><summary>Grade · Qty · Notes${chips?' — '+chips:''}</summary>
         <div class="xp-body">
           <div class="ownedonly mini">
             <label>Grade<select data-grade>${GRADES.map(g=>`<option ${g===(mk.g||'')?'selected':''}>${g||'—'}</option>`).join('')}</select></label>
-            <label>Qty<input class="qty" type="number" min="0" data-qty value="${mk.q||''}" placeholder="0"></label>
-            <label>Paid $<input class="qty" type="number" min="0" step="0.01" data-paid value="${mk.paid||''}" placeholder="0"></label>
-            <label>Value $<input class="qty" type="number" min="0" step="0.01" data-val value="${mk.val||''}" placeholder="0"></label>
+            <label>Qty<input class="qty" type="number" min="0" data-qty value="${esc(mk.q||'')}" placeholder="0"></label>
+            <label>Paid $<input class="qty" type="number" min="0" step="0.01" data-paid value="${esc(mk.paid||'')}" placeholder="0"></label>
+            <label>Value $<input class="qty" type="number" min="0" step="0.01" data-val value="${esc(mk.val||'')}" placeholder="0"></label>
           </div>
           <div class="notowned-hint">Mark this card owned (＋) to log a grade & quantity.</div>
           <textarea data-jr placeholder="Notes — when/where you got it, condition, memories…">${esc(mk.j||'')}</textarea>
@@ -1108,7 +1214,9 @@ function bulkMark(val){
   const ids=currentViewIds(); if(!ids.length){ toast('Nothing to update'); return; }
   if(ids.length>40 && !confirm(`${val?'Mark':'Clear'} ${ids.length} cards${val?' as owned':''}?`)) return;
   lastBulk=ids.map(i=>[i, MARKS[i]?JSON.parse(JSON.stringify(MARKS[i])):null]);
-  ids.forEach(i=>markOwned(i,val));
+  snapshotPush('before-bulk');
+  ids.forEach(i=>_markOwnedMem(i,val));
+  saveMarks();
   render(); toastUndo(`${ids.length} card${ids.length===1?'':'s'} ${val?'marked owned ✔':'cleared'}`); if(val) checkMilestones();
 }
 function undoBulk(){ if(!lastBulk)return; lastBulk.forEach(([i,prev])=>{ if(prev)MARKS[i]=prev; else delete MARKS[i]; }); saveMarks(); lastBulk=null; render(); toast('Undone'); }
@@ -1348,7 +1456,7 @@ function vGuide(){
    ${chl('18,190','Scrimmage yds','#6')}${chl('99','Rushing TDs','#10')}${chl('10','1,000-yд seasons','ALL')}
    <div class="r" style="border:none;color:var(--mut);font-size:12px">2,000-yard season (1997) · 4× rushing champ · HOF 2004 (1st ballot)</div>
   </div></div>
-  <div class="foot">Barry Sanders Collectors Hub · V226 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
+  <div class="foot">Barry Sanders Collectors Hub · V227 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
 }
 
 /* ---------- filters ---------- */
@@ -1470,7 +1578,7 @@ function wire(){
 function updateBadges(){ /* placeholder for live counts if needed */ }
 
 /* ---------- utils ---------- */
-function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 let toastT; function toast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('show'),1800); }
 
 /* ---------- menu (export/import/install/reset) ---------- */
@@ -1518,9 +1626,9 @@ document.getElementById('menuBtn').onclick=()=>{
   updatePhotoMeter();
   $('#mImportCsv').onclick=()=>$('#mCsv').click();
   $('#mCsv').onchange=e=>{ const f=e.target.files[0]; e.target.value=''; if(f) importCSV(f); };
-  $('#mReset').onclick=()=>{ if(confirm('Erase all owned/want/grade marks on this device? You\'ll get one chance to undo right after.')){ try{ localStorage.setItem('bs_hub_trash', JSON.stringify({marks:MARKS, goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}'), t:Date.now()})); }catch(e){} snapshotPush('before-reset'); MARKS={}; _guardBypass=true; saveMarks(); localStorage.removeItem('bs_hub_goals'); closeModal(); render(); toastUndo('All marks cleared', undoReset, 8000); } };
+  $('#mReset').onclick=()=>{ if(confirm('Erase all owned/want/grade marks on this device? You\'ll get one chance to undo right after.')){ try{ localStorage.setItem('bs_hub_trash', JSON.stringify({marks:runtimeToStore(MARKS), goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}'), t:Date.now(), v:2})); }catch(e){} snapshotPush('before-reset'); MARKS={}; _orphansReset(); _guardBypass=true; saveMarks(); localStorage.removeItem('bs_hub_goals'); closeModal(); render(); toastUndo('All marks cleared', undoReset, 8000); } };
 };
-function undoReset(){ try{ const t=JSON.parse(localStorage.getItem('bs_hub_trash')||'null'); if(t&&t.marks){ MARKS=t.marks; saveMarks(); if(t.goals) localStorage.setItem('bs_hub_goals',JSON.stringify(t.goals)); render(); toast('Restored ✔'); } else { toast('Nothing to restore'); } }catch(e){} }
+function undoReset(){ try{ const t=JSON.parse(localStorage.getItem('bs_hub_trash')||'null'); if(t&&t.marks){ _orphansReset(); MARKS=(t.v===2)?storeToRuntime(t.marks,true):t.marks; _guardBypass=true; saveMarks(); if(t.goals) localStorage.setItem('bs_hub_goals',JSON.stringify(t.goals)); render(); toast('Restored ✔'); } else { toast('Nothing to restore'); } }catch(e){} }
 function showSnapshots(){
   snapshotList().then(list=>{
     if(!list.length){ showModal('<h3>Previous versions</h3><p style="font-size:13px;color:var(--mut)">No saved snapshots yet — they’re created automatically as you make changes.</p><div class="actions"><button class="btn p" id="mClose">Close</button></div>'); $('#mClose').onclick=closeModal; return; }
@@ -1532,7 +1640,7 @@ function showSnapshots(){
 }
 function exportMarks(){
   const _m=runtimeToStore(MARKS);
-  const data={app:'BarrySandersCollectorsHub',ver:'V226',fmt:'id2',schema:2,exported:new Date().toISOString(),count:{o:_ownedCount(MARKS),w:_wantCount(MARKS)},sum:_sum(_m),marks:_m,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
+  const data={app:'BarrySandersCollectorsHub',ver:'V227',fmt:'id2',schema:2,exported:new Date().toISOString(),count:{o:_ownedCount(MARKS),w:_wantCount(MARKS)},sum:_sum(_m),marks:_m,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fileBase('collection')+'-'+new Date().toISOString().slice(0,10)+'.json'; a.click();
   try{ localStorage.setItem('bs_hub_lastbackup', String(ownedCount())); }catch(e){}
@@ -1542,6 +1650,7 @@ let _pendingImport=null;
 function importMarks(e){
   const f=e.target.files[0]; if(!f)return; const r=new FileReader();
   r.onload=()=>{ try{ const d=JSON.parse(r.result); if(!d.marks||typeof d.marks!=='object'){ alert('That file has no collection data.'); return; }
+    if(Array.isArray(d.marks)){ alert('That file isn’t a collection backup.'); return; }
     const nk=Object.keys(d.marks).length;
     if(nk>200000){ alert('That file looks malformed (too large) — not importing.'); return; }
     if(d.sum && _sum(d.marks)!==d.sum){ if(!confirm('⚠ This backup’s checksum doesn’t match — the file may be corrupted or edited. Import anyway?')) return; }
@@ -1563,12 +1672,7 @@ function importMarks(e){
 }
 function mergeMarks(incoming){
   Object.keys(incoming).forEach(id=>{
-    const inc=incoming[id]||{}, cur=MARKS[id]||{};
-    const out=Object.assign({}, inc, cur);            // existing wins on conflicts; file fills gaps
-    if(inc.o||cur.o) out.o=true;
-    if(inc.w||cur.w) out.w=Math.max(inc.w||0, cur.w||0);
-    const a1=cur.a||0, a2=inc.a||0, aa=(a1&&a2)?Math.min(a1,a2):(a1||a2); if(out.o&&aa) out.a=aa; else delete out.a;
-    ['o','w','g','q','j'].forEach(k=>{ if(out[k]===''||out[k]===0||out[k]===false||out[k]==null) delete out[k]; });
+    const out=_mergeOne(MARKS[id], incoming[id]);
     if(Object.keys(out).length) MARKS[id]=out; else delete MARKS[id];
   });
   saveMarks();
@@ -1584,7 +1688,8 @@ function _importSummary(mode){
   for(const k in MARKS){ if(MARKS[k].o)own.add(k); if(MARKS[k].w)wnt.add(k); }
   const baseIn={}; Object.keys(inMarks).forEach(k=>{ if(String(k).indexOf('c|')!==0) baseIn[k]=inMarks[k]; });
   const bRT=storeToRuntime(baseIn); for(const k in bRT){ if(bRT[k].o)own.add(k); if(bRT[k].w)wnt.add(k); }
-  return {cur,curCustom,res:{o:own.size,w:wnt.size},resCustom:curCustom+inCustom.length};
+  const have=new Set(CUSTOM.filter(Array.isArray).map(_customSig)); const fresh=new Set(inCustom.map(_cleanRow).filter(Boolean).map(_customSig).filter(s=>!have.has(s)));
+  return {cur,curCustom,res:{o:own.size,w:wnt.size},resCustom:curCustom+fresh.size};
 }
 function applyImport(mode){
   const d=_pendingImport; if(!d)return;
@@ -1599,16 +1704,17 @@ function applyImport(mode){
   const inMarks=d.marks||{}; const inCustom=Array.isArray(d.custom)?d.custom:[];
   if(mode==='replace'){
     // rebuild the custom section of the catalog from the file, then take its marks verbatim
+    snapshotPush('before-import');
     CARDS.length=CUSTOM_BASE; CUSTOM=[];
-    inCustom.forEach(row=>{ CUSTOM.push(Array.isArray(row)?row:null); CARDS.push(Array.isArray(row)?row:DEAD_ROW.slice()); });
-    saveCustom(); snapshotPush('before-import'); MARKS=storeToRuntime(inMarks); _guardBypass=true; saveMarks();
+    inCustom.forEach(raw=>{ const row=_cleanRow(raw); CUSTOM.push(row); CARDS.push(row||DEAD_ROW.slice()); });
+    saveCustom(); _orphansReset(); MARKS=storeToRuntime(inMarks,true); _guardBypass=true; saveMarks();
     if(d.goals) localStorage.setItem('bs_hub_goals',JSON.stringify(d.goals));
   } else {
     // merge base-checklist marks; append the file's custom cards as NEW entries (no index collisions)
-    const baseIn={}; Object.keys(inMarks).forEach(k=>{ if(String(k).indexOf('c|')!==0) baseIn[k]=inMarks[k]; });
-    mergeMarks(storeToRuntime(baseIn));
-    inCustom.forEach((row,pos)=>{ if(!Array.isArray(row))return; const mk=inMarks['c|'+pos]||inMarks[String((d.customBase||CUSTOM_BASE)+pos)]; CUSTOM.push(row); const id=CARDS.push(row)-1; if(mk) MARKS[id]=Object.assign({}, mk); });
-    saveCustom(); saveMarks();
+    snapshotPush('before-import');
+    const ad=_adoptCustom(inCustom, inMarks, d.customBase);          // custom cards matched by identity: no duplicates, marks land on the right card
+    if(ad.added) saveCustom();
+    mergeMarks(storeToRuntime(ad.marks,true));
     if(d.goals){ try{ const cg=JSON.parse(localStorage.getItem('bs_hub_goals')||'{}'); localStorage.setItem('bs_hub_goals', JSON.stringify(Object.assign({}, d.goals, cg))); }catch(e){} }
   }
   _pendingImport=null; closeModal(); render(); toast(mode==='merge'?'Backup merged ✔':'Backup loaded ✔');
@@ -1635,7 +1741,7 @@ function maybeWelcome(){
 }
 
 /* one-time "collection update available" prompt for returning devices when the pushed master collection has changed */
-function preloadUpdInfo(){ let add=0, chg=0; for(const k in PRELOAD_RT){ const p=PRELOAD_RT[k], c=MARKS[k]; const pOwn=p&&(p.o===1||p.o===true); const cOwn=c&&(c.o===1||c.o===true); if(pOwn&&!cOwn){ add++; } else if(JSON.stringify(Object.assign({},c||{},p))!==JSON.stringify(c||{})){ chg++; } } return {add,chg}; }
+function preloadUpdInfo(){ let add=0, chg=0; for(const k in PRELOAD_RT){ const p=PRELOAD_RT[k], c=MARKS[k]; if(p&&p.o&&!(c&&c.o)){ add++; } else if(JSON.stringify(_mergeOne(c,p))!==JSON.stringify(c||{})){ chg++; } } return {add,chg}; }
 function maybePreloadUpdate(){ if(!_pendingUpd) return; const {add,chg}=preloadUpdInfo(); if(add+chg===0){ try{ localStorage.setItem(PSIG_KEY, PRELOAD_SIG); }catch(e){} return; } setTimeout(()=>{
     showModal(`<h3>📥 Collection update available</h3>
       <p style="font-size:13.5px">The master collection changed since this device last synced${add?` — <b>${add}</b> new card${add===1?'':'s'} marked owned`:''}${chg?`${add?', plus ':' — '}<b>${chg}</b> updated`:''}.</p>
@@ -1646,7 +1752,7 @@ function maybePreloadUpdate(){ if(!_pendingUpd) return; const {add,chg}=preloadU
     const a=$('#puApply'); if(a) a.onclick=applyPreloadUpdate;
     const l=$('#puLater'); if(l) l.onclick=()=>{ try{ localStorage.setItem(PDIS_KEY, PRELOAD_SIG); }catch(e){} _pendingUpd=false; closeModal(); };
   }, 400); }
-function applyPreloadUpdate(){ for(const k in PRELOAD_RT){ MARKS[k]=Object.assign({}, MARKS[k]||{}, PRELOAD_RT[k]); } saveMarks(); try{ localStorage.setItem(PSIG_KEY, PRELOAD_SIG); localStorage.removeItem(PDIS_KEY); }catch(e){} _pendingUpd=false; closeModal(); render(); toast('Collection updated ✔'); }
+function applyPreloadUpdate(){ snapshotPush('before-update'); for(const k in PRELOAD_RT){ const mg=_mergeOne(MARKS[k], PRELOAD_RT[k]); if(Object.keys(mg).length) MARKS[k]=mg; } saveMarks(); try{ localStorage.setItem(PSIG_KEY, PRELOAD_SIG); localStorage.removeItem(PDIS_KEY); }catch(e){} _pendingUpd=false; closeModal(); render(); toast('Collection updated ✔'); }
 
 /* ---------- add a custom card ---------- */
 function openAddCard(prefillYear){
@@ -1729,6 +1835,7 @@ function applyCSV(rows){
   if(!rows.length){ alert('No rows found in that file.'); return; }
   const norm=s=>String(s).toUpperCase().replace(/[^A-Z0-9]/g,'');
   let added=0, already=0, unmatched=0;
+  snapshotPush('before-csv');
   rows.forEach(o=>{
     const yr=csvCol(o,['year','yr']); const num=csvCol(o,['card #','card#','number','no','no.','card number','#','card no']);
     const setn=csvCol(o,['set / brand','set','brand','set/brand','product','set name']);
@@ -1742,9 +1849,10 @@ function applyCSV(rows){
     if(cands.length===1) pick=cands[0];
     else if(cands.length>1 && setn){ const st=setn.toLowerCase(); let best=-1,bs=0; cands.forEach(idx=>{ const hay=String(CARDS[idx][S]).toLowerCase(); let sc=0; st.split(/\s+/).forEach(t=>{ if(t.length>2&&hay.includes(t))sc++; }); if(sc>bs){bs=sc;best=idx;} }); pick=bs>0?best:cands[0]; }
     else if(cands.length>1) pick=cands[0];
-    if(pick>=0){ if(owned(pick))already++; else added++; const extra={}; if(grade)extra.g=grade; if(qty&&+qty>0)extra.q=+qty; markOwned(pick,true,extra); }
+    if(pick>=0){ if(owned(pick))already++; else added++; const extra={}; if(grade)extra.g=grade; if(qty&&+qty>0)extra.q=+qty; _markOwnedMem(pick,true,extra); }
     else unmatched++;
   });
+  saveMarks();
   render();
   showModal(`<h3>CSV import complete</h3>
    <p style="font-size:14px"><b>${added}</b> newly marked owned<br><b>${already}</b> were already owned<br><b>${unmatched}</b> row${unmatched===1?'':'s'} couldn't be matched</p>
@@ -1823,7 +1931,7 @@ document.getElementById('fab').onclick=()=>openAddCard(CUR.view==='years'?CUR.ye
 document.getElementById('exportBtn').onclick=exportMarks;
 document.getElementById('main').addEventListener('click',e=>{ if(e.target&&e.target.id==='moreBtn') showMore(); });
 restoreState();
-(function(){ const h=location.hash.replace('#','').split('/'); if(h[0]){CUR.view=h[0]; if(h[1])CUR.year=+h[1];} })();
+_applyHash();
 maybeWelcome();
 maybePreloadUpdate();
 if(syncCode()) setTimeout(()=>syncNow(true), 1200);
@@ -1836,24 +1944,41 @@ render();
   f.textContent='Barry Sanders Collectors Hub · '+APP_VER;
   f.onclick=function(){ try{ toast('You’re on '+APP_VER+' — checking for updates…'); }catch(e){} try{ checkAppVersion(); }catch(e){} };
 })();
-/* durable-storage: ask the browser not to evict, and self-heal from the healthiest surviving copy
-   (IndexedDB mirror or the known-good anchor) if localStorage was cleared or came back empty */
+/* durable-storage: ask the browser not to evict, and self-heal if localStorage was cleared, truncated or came
+   back unreadable. The healthiest surviving copy (the known-good anchor read at boot, else the IndexedDB
+   mirror) is merged in ADDITIVELY — it only ever adds cards back, and only when it holds clearly more
+   (5+) than what loaded, so a deliberate removal is never undone. */
 (async function(){
   try{
-    if(_ownedCount(MARKS)===0){
+    const cur=_ownedCount(MARKS);
+    if(CUSTOM.length===0){
       const rc=await idbLoadCustom();
-      if(Array.isArray(rc) && rc.length && CUSTOM.length===0){ CUSTOM=rc; rc.forEach(row=>CARDS.push(Array.isArray(row)?row:DEAD_ROW.slice())); saveCustom(); }
-      const cands=[];
-      const r=await idbLoad(); if(r) cands.push({src:'idb', m:r, o:_ownedCount(storeToRuntime(r))});
-      const g=_readGood(); if(g&&g.m) cands.push({src:'good', m:g.m, o:g.o||_ownedCount(storeToRuntime(g.m))});
-      let best=null; for(const c of cands){ if(c.o>0 && (!best||c.o>best.o)) best=c; }
-      if(best){ _guardBypass=true; MARKS=storeToRuntime(best.m); saveMarks(); render(); toast('Your collection was restored ✔ ('+best.o+' owned)'); }
+      if(Array.isArray(rc) && rc.length){ const rows=rc.map(_cleanRow); CUSTOM=rows; rows.forEach(row=>CARDS.push(Array.isArray(row)?row:DEAD_ROW.slice())); saveCustom();
+        const pend={}; for(const k in ORPHANS){ if(k[0]==='c'){ pend[k]=ORPHANS[k]; delete ORPHANS[k]; } } if(Object.keys(pend).length) mergeMarks(storeToRuntime(pend,true)); }
     }
-    else { idbSave(); }
+    /* candidates: the safety anchor (written with every save) and the IndexedDB mirror — the mirror only
+       counts when its generation is NEWER than localStorage's, i.e. a localStorage write really was lost
+       (cleared, quota, corrupted), never when it merely lags a deliberate edit by half a second */
+    const cands=[];
+    if(_bootGood && _bootGood.m && typeof _bootGood.m==='object') cands.push({m:_bootGood.m, name:'safety copy'});
+    const r=await idbLoad(), ig=+(await idbGet(LSKEY+'_gen'))||0;
+    if(r && typeof r==='object' && (ig>_bootGen || !_hadSaved)) cands.push({m:r, name:'backup copy'});   // newer than localStorage, or localStorage had nothing readable
+    let best=null, bestRT=null, bo=-1;
+    for(const c of cands){ const rt=storeToRuntime(c.m,true), n=_ownedCount(rt); if(n>bo){ bo=n; best=c; bestRT=rt; } }
+    if(best && (bo-cur>=5 || (cur===0 && bo>0))){ snapshotPush('before-heal'); mergeMarks(bestRT); render(); toast('Recovered '+(bo-cur)+' cards from your '+best.name+' ✔'); }
+    idbSave();
   }catch(e){}
   try{ await photoLoadKeys(); if(PHOTOKEYS.size){ render(); } }catch(e){}   // reveal photo thumbnails once keys load
   requestPersist();
 })();
+/* keep every open tab / the installed app in step: pick up other tabs' saves instead of overwriting them */
+function _deferRender(){ const a=document.activeElement; if(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.closest && a.closest('#main')) return; try{ render(); }catch(e){} }
+window.addEventListener('storage',e=>{
+  if(e.storageArea!==localStorage) return;
+  if(e.key===LSKEY){ if(_reconcileExternal()){ _lastGoodCount=_ownedCount(MARKS); _deferRender(); } }
+  else if(e.key==='bs_hub_custom'){ location.reload(); }
+});
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden && _reconcileExternal()){ _lastGoodCount=_ownedCount(MARKS); _deferRender(); } });
 </script>
 </body>
 </html>
