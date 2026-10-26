@@ -408,7 +408,7 @@ const ERAS=[
 ];
 function eraOf(y){ return ERAS.find(e=>y>=e.lo&&y<=e.hi) || ERAS[ERAS.length-1]; }
 
-const APP_VER='V227';
+const APP_VER='V228';
 /* ---------- STATE (localStorage) ---------- */
 const LSKEY='bs_hub_marks_v1';
 const PRELOAD_MARKS = /*__PRELOAD__*/{}/*__ENDP__*/;
@@ -1456,7 +1456,7 @@ function vGuide(){
    ${chl('18,190','Scrimmage yds','#6')}${chl('99','Rushing TDs','#10')}${chl('10','1,000-yд seasons','ALL')}
    <div class="r" style="border:none;color:var(--mut);font-size:12px">2,000-yard season (1997) · 4× rushing champ · HOF 2004 (1st ballot)</div>
   </div></div>
-  <div class="foot">Barry Sanders Collectors Hub · V227 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
+  <div class="foot">Barry Sanders Collectors Hub · V228 · Created by MightyMoose · MM Collecting<br>Checklist from Jeff Granitz, cross-referenced with the Trading Card Database. Free for personal collecting.</div>`;
 }
 
 /* ---------- filters ---------- */
@@ -1640,7 +1640,7 @@ function showSnapshots(){
 }
 function exportMarks(){
   const _m=runtimeToStore(MARKS);
-  const data={app:'BarrySandersCollectorsHub',ver:'V227',fmt:'id2',schema:2,exported:new Date().toISOString(),count:{o:_ownedCount(MARKS),w:_wantCount(MARKS)},sum:_sum(_m),marks:_m,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
+  const data={app:'BarrySandersCollectorsHub',ver:'V228',fmt:'id2',schema:2,exported:new Date().toISOString(),count:{o:_ownedCount(MARKS),w:_wantCount(MARKS)},sum:_sum(_m),marks:_m,custom:CUSTOM,customBase:CUSTOM_BASE,goals:JSON.parse(localStorage.getItem('bs_hub_goals')||'{}')};
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fileBase('collection')+'-'+new Date().toISOString().slice(0,10)+'.json'; a.click();
   try{ localStorage.setItem('bs_hub_lastbackup', String(ownedCount())); }catch(e){}
@@ -1895,14 +1895,25 @@ if('serviceWorker' in navigator){
   });
 }
 /* poll for a newer deployed version (works with or without a service worker) */
-setTimeout(checkAppVersion, 4000);
-setInterval(checkAppVersion, 900000);
+setTimeout(checkAppVersion, 2500);
+setInterval(checkAppVersion, 600000);
+/* check every time the app comes back into view by ANY route (tab switch, un-minimise, phone unlock, back/forward
+   cache restore, regained connection) — an installed app can sit in the background for days */
 document.addEventListener('visibilitychange',()=>{ if(!document.hidden) checkAppVersion(); });
+window.addEventListener('pageshow',()=>checkAppVersion());
+window.addEventListener('focus',()=>checkAppVersion());
+window.addEventListener('online',()=>checkAppVersion());
 /* ---------- app-version update prompt ---------- */
-let _updDismiss=null;
+let _updDismiss=null, _updRetryT=null, _updAvail=null;
+/* remember "tried / not now" per version, but only for a while — it must never suppress updates for days */
+function _updMemGet(k){ try{ const s=sessionStorage.getItem(k); if(!s) return null; const [v,t]=s.split('|'); return (Date.now()-(+t||0))<6*3600*1000 ? v : null; }catch(e){ return null; } }
+function _updMemSet(k,v){ try{ sessionStorage.setItem(k, v+'|'+Date.now()); }catch(e){} }
+function _updFoot(){ const f=document.getElementById('appfoot'); if(f) f.textContent='Barry Sanders Collectors Hub · '+APP_VER+(_updAvail?' · update available — tap to install':''); }
 function promptUpdate(newVer, apply){
-  if(_updDismiss===newVer) return;                 // user already said "not now" for this version
-  if(document.getElementById('modal')) return;      // don't stack over another dialog
+  _updAvail=newVer||'new'; _updFoot();               // always visible in the footer, even if the pop-up is dismissed
+  if(newVer ? _updDismiss===newVer : _updDismiss!==null) return;      // user already said "not now"
+  const open=document.getElementById('modal');
+  if(open){ if(!document.getElementById('updYes')){ clearTimeout(_updRetryT); _updRetryT=setTimeout(()=>promptUpdate(newVer,apply),12000); } return; }   // another dialog is open: try again shortly instead of giving up
   apply = apply || (()=>location.reload());
   const vtxt = (newVer && /^V?\d/i.test(newVer)) ? ` (<b>${esc(newVer)}</b>)` : '';
   showModal(`<h3>🔄 Update available</h3>
@@ -1911,15 +1922,17 @@ function promptUpdate(newVer, apply){
     <div style="display:flex;gap:8px;margin-top:12px">
       <button class="btn" id="updYes" style="flex:1">Update now</button>
       <button class="btn s" id="updNo" style="flex:1">Not now</button></div>`);
-  const y=$('#updYes'); if(y) y.onclick=()=>{ try{ if(newVer) sessionStorage.setItem('bs_hub_updto', newVer); }catch(e){} apply(); };
-  const n=$('#updNo'); if(n) n.onclick=()=>{ _updDismiss=newVer; try{ if(newVer) sessionStorage.setItem('bs_hub_upddis', newVer); }catch(e){} closeModal(); };
+  const y=$('#updYes'); if(y) y.onclick=()=>{ if(newVer) _updMemSet('bs_hub_updto', newVer); apply(); };
+  const n=$('#updNo'); if(n) n.onclick=()=>{ _updDismiss=newVer||'sw'; if(newVer) _updMemSet('bs_hub_upddis', newVer); closeModal(); };
 }
-async function checkAppVersion(){ try{ const r=await fetch('version.txt',{cache:'no-store'}); if(!r||!r.ok) return; const v=(await r.text()).trim(); if(!v) return;
-  if(v===APP_VER){ try{ sessionStorage.removeItem('bs_hub_updto'); sessionStorage.removeItem('bs_hub_upddis'); }catch(e){} return; }
-  let tried=null,dism=null; try{ tried=sessionStorage.getItem('bs_hub_updto'); dism=sessionStorage.getItem('bs_hub_upddis'); }catch(e){}
-  if(v===tried || v===dism) return;   // already tried to reach this version (deployment skew) or dismissed — never loop
+async function checkAppVersion(force){ try{
+  try{ const reg=await navigator.serviceWorker.getRegistration(); if(reg) reg.update().catch(()=>{}); }catch(e){}   // nudge the browser to look for a new service worker too
+  const r=await fetch('version.txt',{cache:'no-store'}); if(!r||!r.ok){ if(force===true) toast('Couldn’t check for updates — are you online?'); return; }
+  const v=(await r.text()).trim(); if(!v) return;
+  if(v===APP_VER){ _updAvail=null; _updFoot(); try{ sessionStorage.removeItem('bs_hub_updto'); sessionStorage.removeItem('bs_hub_upddis'); }catch(e){} if(force===true) toast('You’re on the latest version ('+APP_VER+')'); return; }
+  if(force!==true && (v===_updMemGet('bs_hub_updto') || v===_updMemGet('bs_hub_upddis'))){ _updAvail=v; _updFoot(); return; }   // already tried (deployment skew) or dismissed: don't nag or loop
   promptUpdate(v);
-}catch(e){} }
+}catch(e){ if(force===true) toast('Couldn’t check for updates — are you online?'); } }
 /* service-worker path (installed PWAs): route the waiting worker through the same popup */
 function showUpdateToast(reg){ promptUpdate(null, ()=>{ if(reg&&reg.waiting){ reg.waiting.postMessage('skipWaiting'); } else { location.reload(); } }); }
 
@@ -1942,7 +1955,7 @@ render();
 /* footer build stamp — lets you confirm at a glance which version a device is running */
 (function(){ var f=document.getElementById('appfoot'); if(!f) return;
   f.textContent='Barry Sanders Collectors Hub · '+APP_VER;
-  f.onclick=function(){ try{ toast('You’re on '+APP_VER+' — checking for updates…'); }catch(e){} try{ checkAppVersion(); }catch(e){} };
+  f.onclick=function(){ _updDismiss=null; try{ sessionStorage.removeItem('bs_hub_updto'); sessionStorage.removeItem('bs_hub_upddis'); }catch(e){} try{ toast('You’re on '+APP_VER+' — checking for updates…'); }catch(e){} try{ checkAppVersion(true); }catch(e){} };
 })();
 /* durable-storage: ask the browser not to evict, and self-heal if localStorage was cleared, truncated or came
    back unreadable. The healthiest surviving copy (the known-good anchor read at boot, else the IndexedDB
